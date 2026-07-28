@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="바닐라 JavaScript와 FastAPI로 만든 OpenAI 호환 AI 채팅 인터페이스"
+    />
+    <meta name="theme-color" content="#f4f1eb" />
+    <title>OpenUI JS — Vanilla</title>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar" aria-label="채팅 목록">
+        <div class="brand-row">
+          <a class="brand" href="/" aria-label="OpenUI JS 홈">
+            <span class="brand-mark" aria-hidden="true"><i></i><i></i></span>
+            <span>OpenUI <b>JS</b></span>
+          </a>
+          <button class="icon-button mobile-only" id="closeSidebar" aria-label="사이드바 닫기">
+            ×
+          </button>
+        </div>
+        <button class="new-chat-button" id="newChat" type="button">
+          <span aria-hidden="true">＋</span>새 대화<kbd>⌘ K</kbd>
+        </button>
+        <div class="history-heading">
+          <span>최근 대화</span><span id="chatCount">0</span>
+        </div>
+        <nav class="chat-list" id="chatList" aria-label="최근 대화"></nav>
+        <div class="sidebar-footer">
+          <div class="connection-card">
+            <span class="status-dot" id="statusDot" aria-hidden="true"></span>
+            <div>
+              <strong id="connectionTitle">연결 확인 중</strong>
+              <span id="connectionDetail">모델 서버를 찾고 있어요</span>
+            </div>
+          </div>
+          <button class="theme-button" id="themeButton" type="button">
+            <span id="themeIcon" aria-hidden="true">☼</span>
+            <span id="themeLabel">라이트 모드</span>
+          </button>
+        </div>
+      </aside>
+      <div class="sidebar-backdrop" id="backdrop"></div>
+
+      <main class="main-panel">
+        <header class="topbar">
+          <button class="icon-button mobile-only" id="openSidebar" aria-label="사이드바 열기">
+            ☰
+          </button>
+          <div id="modelPickerWrap">
+            <button class="model-picker" id="modelPicker" type="button" aria-haspopup="listbox">
+              <span>
+                <small>사용 모델</small>
+                <strong id="selectedModel">모델 불러오는 중</strong>
+              </span>
+              <span class="chevron" aria-hidden="true">⌄</span>
+            </button>
+            <div class="model-menu" id="modelMenu" role="listbox"></div>
+          </div>
+          <div class="topbar-actions">
+            <button class="icon-button" id="clearChat" type="button" aria-label="현재 대화 비우기">
+              ⌫
+            </button>
+          </div>
+        </header>
+
+        <section class="conversation" id="conversation" aria-live="polite">
+          <div class="empty-state" id="emptyState">
+            <div class="hero-orbit" aria-hidden="true">
+              <span class="orbit-ring"></span>
+              <span class="hero-mark"><i></i><i></i></span>
+            </div>
+            <p class="eyebrow">VANILLA JAVASCRIPT · FASTAPI BACKEND</p>
+            <h1>무엇을 같이<br /><em>만들어볼까요?</em></h1>
+            <p class="hero-copy">
+              Ollama 또는 OpenAI 호환 모델과 대화하세요.<br />
+              기록은 이 브라우저에만 안전하게 보관됩니다.
+            </p>
+            <div class="suggestion-grid">
+              <button class="suggestion" type="button" data-prompt="오늘 집중할 일을 우선순위별로 정리해줘">
+                <span class="suggestion-icon amber">01</span>
+                <span><strong>하루 계획 세우기</strong><small>중요한 일부터 차근차근</small></span>
+                <b aria-hidden="true">↗</b>
+              </button>
+              <button class="suggestion" type="button" data-prompt="바닐라 JavaScript로 작은 사이드 프로젝트 아이디어 5개를 제안해줘">
+                <span class="suggestion-icon green">02</span>
+                <span><strong>아이디어 탐색하기</strong><small>다음 프로젝트의 시작점</small></span>
+                <b aria-hidden="true">↗</b>
+              </button>
+              <button class="suggestion" type="button" data-prompt="아래 내용을 더 명확하고 자연스럽게 다듬어줘:\n\n">
+                <span class="suggestion-icon blue">03</span>
+                <span><strong>글 다듬기</strong><small>더 선명하고 자연스럽게</small></span>
+                <b aria-hidden="true">↗</b>
+              </button>
+            </div>
+          </div>
+          <div class="message-list" id="messageList"></div>
+        </section>
+
+        <footer class="composer-wrap">
+          <form class="composer" id="composer">
+            <textarea
+              id="messageInput"
+              rows="1"
+              maxlength="32000"
+              placeholder="메시지를 입력하세요"
+              aria-label="메시지"
+            ></textarea>
+            <div class="composer-bottom">
+              <span class="composer-hint"><kbd>Enter</kbd> 전송 · <kbd>Shift Enter</kbd> 줄바꿈</span>
+              <button class="send-button" id="sendButton" type="submit" aria-label="메시지 보내기">
+                ↑
+              </button>
+            </div>
+          </form>
+          <p class="disclaimer">AI는 실수할 수 있습니다. 중요한 정보는 한 번 더 확인하세요.</p>
+        </footer>
+      </main>
+    </div>
+
+    <template id="messageTemplate">
+      <article class="message">
+        <div class="avatar" aria-hidden="true"></div>
+        <div class="message-content">
+          <div class="message-meta"><strong></strong><span></span></div>
+          <div class="message-body"></div>
+          <div class="message-actions"><button class="copy-button" type="button">복사</button></div>
+        </div>
+      </article>
+    </template>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
