@@ -4,6 +4,17 @@ const STORAGE_KEY = "openui-js-vanilla-state-v1";
 const THEME_KEY = "openui-js-theme";
 const $ = (selector) => document.querySelector(selector);
 const elements = {
+  accountArea: $("#accountArea"),
+  authClose: $("#authClose"),
+  authCopy: $("#authCopy"),
+  authEmail: $("#authEmail"),
+  authError: $("#authError"),
+  authForm: $("#authForm"),
+  authModal: $("#authModal"),
+  authPassword: $("#authPassword"),
+  authSubmit: $("#authSubmit"),
+  authSwitch: $("#authSwitch"),
+  authTitle: $("#authTitle"),
   backdrop: $("#backdrop"),
   chatCount: $("#chatCount"),
   chatList: $("#chatList"),
@@ -26,6 +37,7 @@ const elements = {
   sendButton: $("#sendButton"),
   sidebar: $("#sidebar"),
   statusDot: $("#statusDot"),
+  storageMessage: $("#storageMessage"),
   themeButton: $("#themeButton"),
   themeIcon: $("#themeIcon"),
   themeLabel: $("#themeLabel")
@@ -38,7 +50,13 @@ const state = {
   defaultModel: "llama3.2",
   models: [],
   generating: false,
-  controller: null
+  controller: null,
+  user: undefined,
+  authMode: "login",
+  authRequired: true,
+  registrationAllowed: true,
+  syncStatus: "로컬 저장",
+  syncTimer: null
 };
 
 const makeId = () =>
@@ -59,8 +77,8 @@ function save() {
   localStorage.setItem(
     STORAGE_KEY,
     JSON.stringify({
-      chats: state.chats,
-      activeChatId: state.activeChatId,
+      chats: state.user ? [] : state.chats,
+      activeChatId: state.user ? null : state.activeChatId,
       selectedModel: state.selectedModel
     })
   );
@@ -68,6 +86,17 @@ function save() {
 
 function activeChat() {
   return state.chats.find((chat) => chat.id === state.activeChatId);
+}
+
+function normalizeChat(chat) {
+  return {
+    ...chat,
+    title: chat.title || "새 대화",
+    model: chat.model || state.selectedModel || state.defaultModel,
+    createdAt: chat.createdAt || Date.now(),
+    updatedAt: chat.updatedAt || chat.createdAt || Date.now(),
+    messages: Array.isArray(chat.messages) ? chat.messages : []
+  };
 }
 
 function escapeHtml(value) {
@@ -177,17 +206,73 @@ function renderChats() {
   }
 }
 
+function renderAccount() {
+  elements.accountArea.replaceChildren();
+  if (state.user) {
+    const card = document.createElement("div");
+    card.className = "account-card";
+    card.innerHTML =
+      '<span class="account-avatar" aria-hidden="true"></span><div><strong></strong><span></span></div><button type="button">로그아웃</button>';
+    card.querySelector(".account-avatar").textContent = state.user.email
+      .slice(0, 1)
+      .toUpperCase();
+    card.querySelector("strong").textContent = state.user.email;
+    card.querySelector("div span").textContent = state.syncStatus;
+    card.querySelector("button").addEventListener("click", logout);
+    elements.accountArea.append(card);
+    elements.storageMessage.textContent =
+      "대화는 내 계정의 SQLite 저장소에 동기화됩니다.";
+    return;
+  }
+
+  const button = document.createElement("button");
+  button.className = "account-login";
+  button.type = "button";
+  button.disabled = state.user === undefined;
+  button.innerHTML =
+    '<span class="account-avatar" aria-hidden="true">↗</span><span><strong></strong><small>대화를 서버에 동기화</small></span>';
+  button.querySelector("strong").textContent =
+    state.user === undefined ? "계정 확인 중" : "로그인";
+  button.addEventListener("click", openAuth);
+  elements.accountArea.append(button);
+  elements.storageMessage.textContent = "로그인 전 기록은 이 브라우저에 보관됩니다.";
+}
+
+function updateAccess() {
+  const blocked = state.authRequired && !state.user;
+  elements.input.disabled = state.generating || blocked;
+  elements.sendButton.disabled = state.generating || blocked;
+  elements.input.placeholder = blocked
+    ? "로그인 후 메시지를 보낼 수 있어요"
+    : "메시지를 입력하세요";
+}
+
 function render() {
   renderChats();
   renderMessages();
+  renderAccount();
+  updateAccess();
 }
 
 function newChat() {
-  const chat = { id: makeId(), title: "새 대화", createdAt: Date.now(), messages: [] };
+  if (state.authRequired && !state.user) {
+    openAuth();
+    return null;
+  }
+  const now = Date.now();
+  const chat = {
+    id: makeId(),
+    title: "새 대화",
+    model: state.selectedModel || state.defaultModel,
+    createdAt: now,
+    updatedAt: now,
+    messages: []
+  };
   state.chats.unshift(chat);
   state.activeChatId = chat.id;
   save();
   render();
+  scheduleSync();
   closeSidebar();
   elements.input.focus();
   return chat;
@@ -199,12 +284,166 @@ function deleteChat(chatId) {
   if (state.activeChatId === chatId) state.activeChatId = state.chats[0]?.id || null;
   save();
   render();
+  if (state.user) {
+    fetch(`/api/chats/${encodeURIComponent(chatId)}`, { method: "DELETE" }).catch(() => {
+      state.syncStatus = "동기화 오류";
+      renderAccount();
+    });
+  }
 }
 
 function setGenerating(value) {
   state.generating = value;
-  elements.input.disabled = value;
-  elements.sendButton.disabled = value;
+  updateAccess();
+}
+
+function scheduleSync() {
+  if (!state.user) return;
+  clearTimeout(state.syncTimer);
+  state.syncStatus = "저장 중…";
+  renderAccount();
+  state.syncTimer = setTimeout(async () => {
+    try {
+      const response = await fetch("/api/chats/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chats: state.chats.map(normalizeChat) })
+      });
+      if (!response.ok) throw new Error();
+      state.syncStatus = "서버 동기화됨";
+    } catch {
+      state.syncStatus = "동기화 오류";
+    }
+    renderAccount();
+  }, 600);
+}
+
+function setAuthMode(mode) {
+  if (mode === "register" && !state.registrationAllowed) return;
+  state.authMode = mode;
+  const register = mode === "register";
+  elements.authTitle.textContent = register ? "계정 만들기" : "다시 만나서 반가워요";
+  elements.authCopy.textContent = register
+    ? "대화를 SQLite에 안전하게 저장하고 기기 사이에서 이어가세요."
+    : "로그인하면 서버에 저장된 대화를 불러옵니다.";
+  elements.authPassword.autocomplete = register ? "new-password" : "current-password";
+  elements.authSubmit.textContent = register ? "가입하고 동기화" : "로그인";
+  elements.authSwitch.textContent = register
+    ? "이미 계정이 있나요? 로그인"
+    : "처음인가요? 계정 만들기";
+  elements.authSwitch.hidden = !register && !state.registrationAllowed;
+  elements.authError.hidden = true;
+}
+
+function openAuth() {
+  setAuthMode("login");
+  elements.authModal.hidden = false;
+  requestAnimationFrame(() => elements.authEmail.focus());
+}
+
+function closeAuth() {
+  elements.authModal.hidden = true;
+  elements.authError.hidden = true;
+}
+
+async function authenticate() {
+  elements.authSubmit.disabled = true;
+  elements.authSubmit.textContent = "처리 중…";
+  elements.authError.hidden = true;
+  try {
+    const response = await fetch(`/api/auth/${state.authMode}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email: elements.authEmail.value,
+        password: elements.authPassword.value
+      })
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.detail || "인증 요청을 처리하지 못했습니다.");
+    }
+    state.user = payload.user;
+    state.syncStatus = "동기화 중";
+    try {
+      const sync = await fetch("/api/chats/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chats: state.chats.map(normalizeChat) })
+      });
+      if (!sync.ok) throw new Error();
+      const synced = await sync.json();
+      state.chats = synced.chats;
+      if (!state.chats.some((chat) => chat.id === state.activeChatId)) {
+        state.activeChatId = state.chats[0]?.id || null;
+      }
+      state.syncStatus = "서버 동기화됨";
+    } catch {
+      state.syncStatus = "동기화 오류";
+    }
+    elements.authPassword.value = "";
+    closeAuth();
+    save();
+    render();
+    loadModels();
+  } catch (error) {
+    elements.authError.textContent = error.message;
+    elements.authError.hidden = false;
+  } finally {
+    elements.authSubmit.disabled = false;
+    elements.authSubmit.textContent =
+      state.authMode === "register" ? "가입하고 동기화" : "로그인";
+  }
+}
+
+async function logout() {
+  state.controller?.abort();
+  await fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
+  state.user = null;
+  state.chats = [];
+  state.activeChatId = null;
+  state.syncStatus = "로컬 저장";
+  save();
+  render();
+  loadModels();
+}
+
+async function restoreSession() {
+  try {
+    const response = await fetch("/api/auth/me");
+    if (!response.ok) {
+      state.user = null;
+      renderAccount();
+      return;
+    }
+    const payload = await response.json();
+    state.user = payload.user;
+    state.syncStatus = "동기화 중";
+    renderAccount();
+    try {
+      const sync = await fetch("/api/chats/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chats: state.chats.map(normalizeChat) })
+      });
+      if (!sync.ok) throw new Error();
+      const synced = await sync.json();
+      state.chats = synced.chats;
+      if (!state.chats.some((chat) => chat.id === state.activeChatId)) {
+        state.activeChatId = state.chats[0]?.id || null;
+      }
+      state.syncStatus = "서버 동기화됨";
+    } catch {
+      state.syncStatus = "동기화 오류";
+    }
+    save();
+    render();
+    loadModels();
+  } catch {
+    state.user = null;
+    state.syncStatus = "로컬 저장";
+    renderAccount();
+  }
 }
 
 async function readStream(response, onDelta) {
@@ -232,12 +471,18 @@ async function readStream(response, onDelta) {
 }
 
 async function sendMessage(content) {
+  if (state.authRequired && !state.user) {
+    openAuth();
+    return;
+  }
   if (!content.trim() || state.generating) return;
   const chat = activeChat() || newChat();
   const user = { id: makeId(), role: "user", content: content.trim(), createdAt: Date.now() };
   const assistant = { id: makeId(), role: "assistant", content: "", createdAt: Date.now() };
   const requestMessages = [...chat.messages, user];
   chat.messages.push(user, assistant);
+  chat.model = state.selectedModel || state.defaultModel;
+  chat.updatedAt = Date.now();
   if (chat.messages.length === 2) {
     chat.title = content.trim().replace(/\s+/g, " ").slice(0, 34);
   }
@@ -274,6 +519,7 @@ async function sendMessage(content) {
     setGenerating(false);
     save();
     render();
+    scheduleSync();
     elements.input.focus();
   }
 }
@@ -288,9 +534,15 @@ function renderModels() {
     option.textContent = model;
     option.addEventListener("click", () => {
       state.selectedModel = model;
+      const chat = activeChat();
+      if (chat) {
+        chat.model = model;
+        chat.updatedAt = Date.now();
+      }
       elements.selectedModel.textContent = model;
       save();
       renderModels();
+      scheduleSync();
       elements.modelMenu.classList.remove("open");
     });
     elements.modelMenu.append(option);
@@ -301,7 +553,20 @@ async function loadModels() {
   try {
     const config = await (await fetch("/api/config")).json();
     state.defaultModel = config.defaultModel;
+    state.authRequired = config.authRequired !== false;
+    state.registrationAllowed = config.registrationAllowed !== false;
     elements.connectionDetail.textContent = new URL(config.apiBaseUrl).host;
+    if (state.authRequired && !state.user) {
+      state.selectedModel ||= state.defaultModel;
+      elements.selectedModel.textContent = state.selectedModel;
+      elements.connectionTitle.textContent = "로그인 필요";
+      elements.connectionDetail.textContent = "모델을 사용하려면 로그인하세요";
+      elements.statusDot.className = "status-dot offline";
+      renderModels();
+      renderAccount();
+      updateAccess();
+      return;
+    }
     const response = await fetch("/api/models");
     if (!response.ok) throw new Error("모델 목록을 불러오지 못했습니다");
     const payload = await response.json();
@@ -323,6 +588,7 @@ async function loadModels() {
   }
   elements.selectedModel.textContent = state.selectedModel;
   renderModels();
+  updateAccess();
   save();
 }
 
@@ -364,8 +630,10 @@ elements.clearChat.addEventListener("click", () => {
   state.controller?.abort();
   chat.messages = [];
   chat.title = "새 대화";
+  chat.updatedAt = Date.now();
   save();
   render();
+  scheduleSync();
 });
 elements.modelPicker.addEventListener("click", () => elements.modelMenu.classList.toggle("open"));
 elements.openSidebar.addEventListener("click", () => {
@@ -376,6 +644,17 @@ elements.closeSidebar.addEventListener("click", closeSidebar);
 elements.backdrop.addEventListener("click", closeSidebar);
 elements.themeButton.addEventListener("click", () =>
   setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark")
+);
+elements.authForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  authenticate();
+});
+elements.authClose.addEventListener("click", closeAuth);
+elements.authModal.addEventListener("mousedown", (event) => {
+  if (event.target === elements.authModal) closeAuth();
+});
+elements.authSwitch.addEventListener("click", () =>
+  setAuthMode(state.authMode === "register" ? "login" : "register")
 );
 document.addEventListener("click", (event) => {
   if (!elements.modelPickerWrap.contains(event.target)) elements.modelMenu.classList.remove("open");
@@ -388,10 +667,15 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     elements.modelMenu.classList.remove("open");
     closeSidebar();
+    closeAuth();
   }
 });
 document.querySelectorAll(".suggestion").forEach((button) =>
   button.addEventListener("click", () => {
+    if (state.authRequired && !state.user) {
+      openAuth();
+      return;
+    }
     elements.input.value = button.dataset.prompt;
     elements.input.dispatchEvent(new Event("input"));
     elements.input.focus();
@@ -405,3 +689,4 @@ setTheme(
 );
 render();
 loadModels();
+restoreSession();

@@ -34,6 +34,10 @@
   box-sizing: border-box;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 html,
 body,
 #root {
@@ -264,6 +268,81 @@ kbd {
 .sidebar-footer {
   padding-top: 12px;
   border-top: 1px solid var(--line);
+}
+
+.account-card,
+.account-login {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 7px;
+  padding: 9px;
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--panel) 68%, transparent);
+  text-align: left;
+}
+
+.account-login:hover {
+  background: var(--panel);
+}
+
+.account-login:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.account-avatar {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 850;
+  place-items: center;
+}
+
+.account-card > div,
+.account-login > span:last-child {
+  min-width: 0;
+}
+
+.account-card strong,
+.account-card span,
+.account-login strong,
+.account-login small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-card strong,
+.account-login strong {
+  font-size: 10px;
+}
+
+.account-card span,
+.account-login small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.account-card > button {
+  padding: 5px 6px;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.account-card > button:hover {
+  background: var(--soft);
+  color: var(--ink);
 }
 
 .connection-card {
@@ -878,6 +957,142 @@ h1 em {
   display: none;
 }
 
+.modal-backdrop {
+  position: fixed;
+  z-index: 100;
+  inset: 0;
+  display: grid;
+  padding: 20px;
+  overflow-y: auto;
+  background: rgba(18, 20, 18, 0.56);
+  backdrop-filter: blur(8px);
+  place-items: center;
+  animation: modal-fade 160ms ease-out;
+}
+
+.auth-modal {
+  position: relative;
+  width: min(430px, 100%);
+  padding: 38px;
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  text-align: center;
+  animation: modal-rise 200ms ease-out;
+}
+
+.auth-modal .hero-mark {
+  margin-bottom: 13px;
+  transform: scale(0.76);
+}
+
+.auth-modal .eyebrow {
+  margin-bottom: 8px;
+}
+
+.auth-modal h2 {
+  margin: 0;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 30px;
+  font-weight: 500;
+  letter-spacing: -0.04em;
+}
+
+.modal-close {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  display: grid;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 20px;
+  place-items: center;
+}
+
+.modal-close:hover {
+  background: var(--soft);
+  color: var(--ink);
+}
+
+.auth-copy {
+  margin: 12px auto 22px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.auth-form {
+  display: grid;
+  gap: 13px;
+  text-align: left;
+}
+
+.auth-form label {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.auth-form input {
+  width: 100%;
+  margin-top: 7px;
+  padding: 12px 13px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  outline: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+
+.auth-form input:focus {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.auth-error {
+  margin: -2px 0 0;
+  color: #c9473c;
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.auth-submit {
+  margin-top: 4px;
+  padding: 12px;
+  border-radius: 11px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.auth-submit:hover:not(:disabled) {
+  background: var(--accent-dark);
+}
+
+.auth-submit:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.auth-switch {
+  margin-top: 16px;
+  padding: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.auth-switch:hover {
+  color: var(--ink);
+}
+
 @keyframes reveal {
   from {
     opacity: 0;
@@ -895,6 +1110,19 @@ h1 em {
 @keyframes blink {
   50% {
     opacity: 0;
+  }
+}
+
+@keyframes modal-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes modal-rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
   }
 }
 
@@ -1003,6 +1231,11 @@ h1 em {
 
   .composer-hint {
     display: none;
+  }
+
+  .auth-modal {
+    padding: 34px 22px 26px;
+    border-radius: 20px;
   }
 }
 

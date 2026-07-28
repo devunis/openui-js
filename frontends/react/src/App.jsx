@@ -33,8 +33,27 @@ function makeId() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function createChat() {
-  return { id: makeId(), title: "새 대화", createdAt: Date.now(), messages: [] };
+function createChat(model = "llama3.2") {
+  const now = Date.now();
+  return {
+    id: makeId(),
+    title: "새 대화",
+    model,
+    createdAt: now,
+    updatedAt: now,
+    messages: []
+  };
+}
+
+function normalizeChat(chat, fallbackModel = "llama3.2") {
+  return {
+    ...chat,
+    title: chat.title || "새 대화",
+    model: chat.model || fallbackModel,
+    createdAt: chat.createdAt || Date.now(),
+    updatedAt: chat.updatedAt || chat.createdAt || Date.now(),
+    messages: Array.isArray(chat.messages) ? chat.messages : []
+  };
 }
 
 function loadSavedState() {
@@ -125,6 +144,89 @@ function Message({ message, streaming }) {
   );
 }
 
+function AuthModal({
+  mode,
+  loading,
+  error,
+  registrationAllowed,
+  onClose,
+  onModeChange,
+  onSubmit
+}) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const register = mode === "register";
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        className="auth-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="auth-title"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <button className="modal-close" type="button" aria-label="닫기" onClick={onClose}>
+          ×
+        </button>
+        <BrandMark hero />
+        <p className="eyebrow">PRIVATE SYNC</p>
+        <h2 id="auth-title">{register ? "계정 만들기" : "다시 만나서 반가워요"}</h2>
+        <p className="auth-copy">
+          {register
+            ? "대화를 SQLite에 안전하게 저장하고 기기 사이에서 이어가세요."
+            : "로그인하면 서버에 저장된 대화를 불러옵니다."}
+        </p>
+        <form
+          className="auth-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            onSubmit({ email, password });
+          }}
+        >
+          <label>
+            이메일
+            <input
+              type="email"
+              autoComplete="email"
+              value={email}
+              required
+              onChange={(event) => setEmail(event.target.value)}
+              placeholder="you@example.com"
+            />
+          </label>
+          <label>
+            비밀번호
+            <input
+              type="password"
+              autoComplete={register ? "new-password" : "current-password"}
+              minLength="8"
+              maxLength="128"
+              value={password}
+              required
+              onChange={(event) => setPassword(event.target.value)}
+              placeholder="8자 이상"
+            />
+          </label>
+          {error ? <p className="auth-error">{error}</p> : null}
+          <button className="auth-submit" type="submit" disabled={loading}>
+            {loading ? "처리 중…" : register ? "가입하고 동기화" : "로그인"}
+          </button>
+        </form>
+        {register || registrationAllowed ? (
+          <button
+            className="auth-switch"
+            type="button"
+            onClick={() => onModeChange(register ? "login" : "register")}
+          >
+            {register ? "이미 계정이 있나요? 로그인" : "처음인가요? 계정 만들기"}
+          </button>
+        ) : null}
+      </section>
+    </div>
+  );
+}
+
 export default function App() {
   const saved = useMemo(loadSavedState, []);
   const [chats, setChats] = useState(saved.chats);
@@ -138,6 +240,14 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [input, setInput] = useState("");
   const [generating, setGenerating] = useState(false);
+  const [user, setUser] = useState(undefined);
+  const [authOpen, setAuthOpen] = useState(false);
+  const [authMode, setAuthMode] = useState("login");
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authError, setAuthError] = useState("");
+  const [authRequired, setAuthRequired] = useState(true);
+  const [registrationAllowed, setRegistrationAllowed] = useState(true);
+  const [syncStatus, setSyncStatus] = useState("로컬 저장");
   const [connection, setConnection] = useState({
     status: "loading",
     title: "연결 확인 중",
@@ -152,6 +262,7 @@ export default function App() {
   const conversationRef = useRef(null);
   const textareaRef = useRef(null);
   const modelPickerRef = useRef(null);
+  const syncTimerRef = useRef(null);
 
   const activeChat = useMemo(
     () => chats.find((chat) => chat.id === activeChatId),
@@ -161,9 +272,74 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(
       STORAGE_KEY,
-      JSON.stringify({ chats, activeChatId, selectedModel })
+      JSON.stringify({
+        chats: user ? [] : chats,
+        activeChatId: user ? null : activeChatId,
+        selectedModel
+      })
     );
-  }, [chats, activeChatId, selectedModel]);
+  }, [chats, activeChatId, selectedModel, user]);
+
+  useEffect(() => {
+    async function restoreSession() {
+      try {
+        const response = await fetch("/api/auth/me");
+        if (!response.ok) {
+          setUser(null);
+          return;
+        }
+        const payload = await response.json();
+        setUser(payload.user);
+        setSyncStatus("동기화 중");
+        try {
+          const sync = await fetch("/api/chats/sync", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              chats: saved.chats.map((chat) => normalizeChat(chat, saved.selectedModel))
+            })
+          });
+          if (!sync.ok) throw new Error();
+          const synced = await sync.json();
+          setChats(synced.chats);
+          setActiveChatId((current) =>
+            synced.chats.some((chat) => chat.id === current)
+              ? current
+              : synced.chats[0]?.id || null
+          );
+          setSyncStatus("서버 동기화됨");
+        } catch {
+          setSyncStatus("동기화 오류");
+        }
+      } catch {
+        setUser(null);
+        setSyncStatus("로컬 저장");
+      }
+    }
+    restoreSession();
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    window.clearTimeout(syncTimerRef.current);
+    setSyncStatus("저장 중…");
+    syncTimerRef.current = window.setTimeout(async () => {
+      try {
+        const response = await fetch("/api/chats/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chats: chats.map((chat) => normalizeChat(chat, selectedModel || defaultModel))
+          })
+        });
+        if (!response.ok) throw new Error();
+        setSyncStatus("서버 동기화됨");
+      } catch {
+        setSyncStatus("동기화 오류");
+      }
+    }, 600);
+    return () => window.clearTimeout(syncTimerRef.current);
+  }, [chats, user, selectedModel, defaultModel]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -189,7 +365,18 @@ export default function App() {
       try {
         const config = await (await fetch("/api/config")).json();
         setDefaultModel(config.defaultModel);
+        setAuthRequired(config.authRequired !== false);
+        setRegistrationAllowed(config.registrationAllowed !== false);
         const host = new URL(config.apiBaseUrl).host;
+        if (config.authRequired !== false && !user) {
+          setSelectedModel((current) => current || config.defaultModel);
+          setConnection({
+            status: "offline",
+            title: "로그인 필요",
+            detail: "모델을 사용하려면 로그인하세요"
+          });
+          return;
+        }
         const response = await fetch("/api/models");
         if (!response.ok) throw new Error("모델 목록을 불러오지 못했습니다");
         const payload = await response.json();
@@ -209,7 +396,7 @@ export default function App() {
       }
     }
     loadModels();
-  }, []);
+  }, [user]);
 
   useEffect(() => {
     const handleClick = (event) => {
@@ -223,6 +410,7 @@ export default function App() {
       if (event.key === "Escape") {
         setModelMenuOpen(false);
         setSidebarOpen(false);
+        setAuthOpen(false);
       }
     };
     document.addEventListener("click", handleClick);
@@ -235,12 +423,20 @@ export default function App() {
 
   const updateChat = useCallback((chatId, updater) => {
     setChats((current) =>
-      current.map((chat) => (chat.id === chatId ? updater(chat) : chat))
+      current.map((chat) =>
+        chat.id === chatId
+          ? { ...updater(chat), updatedAt: Date.now() }
+          : chat
+      )
     );
   }, []);
 
   function startNewChat() {
-    const chat = createChat();
+    if (authRequired && !user) {
+      setAuthOpen(true);
+      return null;
+    }
+    const chat = createChat(selectedModel || defaultModel);
     setChats((current) => [chat, ...current]);
     setActiveChatId(chat.id);
     setSidebarOpen(false);
@@ -253,6 +449,11 @@ export default function App() {
     const nextChats = chats.filter((chat) => chat.id !== chatId);
     setChats(nextChats);
     if (activeChatId === chatId) setActiveChatId(nextChats[0]?.id || null);
+    if (user) {
+      fetch(`/api/chats/${encodeURIComponent(chatId)}`, { method: "DELETE" }).catch(
+        () => setSyncStatus("동기화 오류")
+      );
+    }
   }
 
   function clearChat() {
@@ -261,14 +462,70 @@ export default function App() {
     updateChat(activeChat.id, (chat) => ({ ...chat, title: "새 대화", messages: [] }));
   }
 
+  async function authenticate(credentials) {
+    setAuthLoading(true);
+    setAuthError("");
+    try {
+      const response = await fetch(`/api/auth/${authMode}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(credentials)
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload.detail || "인증 요청을 처리하지 못했습니다.");
+      }
+      setUser(payload.user);
+      setSyncStatus("동기화 중");
+      try {
+        const sync = await fetch("/api/chats/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chats: chats.map((chat) => normalizeChat(chat, selectedModel || defaultModel))
+          })
+        });
+        if (!sync.ok) throw new Error();
+        const synced = await sync.json();
+        setChats(synced.chats);
+        setActiveChatId((current) =>
+          synced.chats.some((chat) => chat.id === current)
+            ? current
+            : synced.chats[0]?.id || null
+        );
+        setSyncStatus("서버 동기화됨");
+      } catch {
+        setSyncStatus("동기화 오류");
+      }
+      setAuthOpen(false);
+    } catch (error) {
+      setAuthError(error.message);
+    } finally {
+      setAuthLoading(false);
+    }
+  }
+
+  async function logout() {
+    abortRef.current?.abort();
+    await fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
+    setUser(null);
+    setChats([]);
+    setActiveChatId(null);
+    setSyncStatus("로컬 저장");
+  }
+
   async function submitMessage(event) {
     event?.preventDefault();
+    if (authRequired && !user) {
+      setAuthOpen(true);
+      return;
+    }
     const content = input.trim();
     if (!content || generating) return;
 
     let chat = activeChat;
     if (!chat) {
-      chat = createChat();
+      chat = createChat(selectedModel || defaultModel);
       setChats((current) => [chat, ...current]);
       setActiveChatId(chat.id);
     }
@@ -292,7 +549,12 @@ export default function App() {
         ? content.replace(/\s+/g, " ").slice(0, 34)
         : chat.title;
 
-    updateChat(chat.id, (current) => ({ ...current, title, messages: nextMessages }));
+    updateChat(chat.id, (current) => ({
+      ...current,
+      title,
+      model: selectedModel || defaultModel,
+      messages: nextMessages
+    }));
     setInput("");
     setGenerating(true);
     abortRef.current = new AbortController();
@@ -432,6 +694,37 @@ export default function App() {
         </nav>
 
         <div className="sidebar-footer">
+          {user ? (
+            <div className="account-card">
+              <span className="account-avatar" aria-hidden="true">
+                {user.email.slice(0, 1).toUpperCase()}
+              </span>
+              <div>
+                <strong>{user.email}</strong>
+                <span>{syncStatus}</span>
+              </div>
+              <button type="button" onClick={logout}>
+                로그아웃
+              </button>
+            </div>
+          ) : (
+            <button
+              className="account-login"
+              type="button"
+              disabled={user === undefined}
+              onClick={() => {
+                setAuthError("");
+                setAuthMode("login");
+                setAuthOpen(true);
+              }}
+            >
+              <span className="account-avatar" aria-hidden="true">↗</span>
+              <span>
+                <strong>{user === undefined ? "계정 확인 중" : "로그인"}</strong>
+                <small>대화를 서버에 동기화</small>
+              </span>
+            </button>
+          )}
           <div className="connection-card">
             <span className={`status-dot ${connection.status}`} aria-hidden="true" />
             <div>
@@ -532,7 +825,9 @@ export default function App() {
               <p className="hero-copy">
                 Ollama 또는 OpenAI 호환 모델과 대화하세요.
                 <br />
-                기록은 이 브라우저에만 안전하게 보관됩니다.
+                {user
+                  ? "대화는 내 계정의 SQLite 저장소에 동기화됩니다."
+                  : "로그인 전 기록은 이 브라우저에 보관됩니다."}
               </p>
               <div className="suggestion-grid">
                 {suggestions.map((suggestion) => (
@@ -541,6 +836,10 @@ export default function App() {
                     type="button"
                     key={suggestion.number}
                     onClick={() => {
+                      if (authRequired && !user) {
+                        setAuthOpen(true);
+                        return;
+                      }
                       setInput(suggestion.prompt);
                       requestAnimationFrame(() => textareaRef.current?.focus());
                     }}
@@ -580,10 +879,14 @@ export default function App() {
               ref={textareaRef}
               rows="1"
               maxLength="32000"
-              placeholder="메시지를 입력하세요"
+              placeholder={
+                authRequired && !user
+                  ? "로그인 후 메시지를 보낼 수 있어요"
+                  : "메시지를 입력하세요"
+              }
               aria-label="메시지"
               value={input}
-              disabled={generating}
+              disabled={generating || (authRequired && !user)}
               onChange={(event) => setInput(event.target.value)}
               onKeyDown={(event) => {
                 if (
@@ -604,7 +907,7 @@ export default function App() {
                 className="send-button"
                 type="submit"
                 aria-label="메시지 보내기"
-                disabled={generating || !input.trim()}
+                disabled={generating || !input.trim() || (authRequired && !user)}
               >
                 ↑
               </button>
@@ -615,6 +918,20 @@ export default function App() {
           </p>
         </footer>
       </main>
+      {authOpen ? (
+        <AuthModal
+          mode={authMode}
+          loading={authLoading}
+          error={authError}
+          registrationAllowed={registrationAllowed}
+          onClose={() => setAuthOpen(false)}
+          onModeChange={(mode) => {
+            setAuthMode(mode);
+            setAuthError("");
+          }}
+          onSubmit={authenticate}
+        />
+      ) : null}
     </div>
   );
 }
