@@ -144,7 +144,15 @@ function Message({ message, streaming }) {
   );
 }
 
-function AuthModal({ mode, loading, error, onClose, onModeChange, onSubmit }) {
+function AuthModal({
+  mode,
+  loading,
+  error,
+  registrationAllowed,
+  onClose,
+  onModeChange,
+  onSubmit
+}) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const register = mode === "register";
@@ -205,13 +213,15 @@ function AuthModal({ mode, loading, error, onClose, onModeChange, onSubmit }) {
             {loading ? "처리 중…" : register ? "가입하고 동기화" : "로그인"}
           </button>
         </form>
-        <button
-          className="auth-switch"
-          type="button"
-          onClick={() => onModeChange(register ? "login" : "register")}
-        >
-          {register ? "이미 계정이 있나요? 로그인" : "처음인가요? 계정 만들기"}
-        </button>
+        {register || registrationAllowed ? (
+          <button
+            className="auth-switch"
+            type="button"
+            onClick={() => onModeChange(register ? "login" : "register")}
+          >
+            {register ? "이미 계정이 있나요? 로그인" : "처음인가요? 계정 만들기"}
+          </button>
+        ) : null}
       </section>
     </div>
   );
@@ -235,6 +245,8 @@ export default function App() {
   const [authMode, setAuthMode] = useState("login");
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState("");
+  const [authRequired, setAuthRequired] = useState(true);
+  const [registrationAllowed, setRegistrationAllowed] = useState(true);
   const [syncStatus, setSyncStatus] = useState("로컬 저장");
   const [connection, setConnection] = useState({
     status: "loading",
@@ -353,7 +365,18 @@ export default function App() {
       try {
         const config = await (await fetch("/api/config")).json();
         setDefaultModel(config.defaultModel);
+        setAuthRequired(config.authRequired !== false);
+        setRegistrationAllowed(config.registrationAllowed !== false);
         const host = new URL(config.apiBaseUrl).host;
+        if (config.authRequired !== false && !user) {
+          setSelectedModel((current) => current || config.defaultModel);
+          setConnection({
+            status: "offline",
+            title: "로그인 필요",
+            detail: "모델을 사용하려면 로그인하세요"
+          });
+          return;
+        }
         const response = await fetch("/api/models");
         if (!response.ok) throw new Error("모델 목록을 불러오지 못했습니다");
         const payload = await response.json();
@@ -373,7 +396,7 @@ export default function App() {
       }
     }
     loadModels();
-  }, []);
+  }, [user]);
 
   useEffect(() => {
     const handleClick = (event) => {
@@ -409,6 +432,10 @@ export default function App() {
   }, []);
 
   function startNewChat() {
+    if (authRequired && !user) {
+      setAuthOpen(true);
+      return null;
+    }
     const chat = createChat(selectedModel || defaultModel);
     setChats((current) => [chat, ...current]);
     setActiveChatId(chat.id);
@@ -489,6 +516,10 @@ export default function App() {
 
   async function submitMessage(event) {
     event?.preventDefault();
+    if (authRequired && !user) {
+      setAuthOpen(true);
+      return;
+    }
     const content = input.trim();
     if (!content || generating) return;
 
@@ -683,6 +714,7 @@ export default function App() {
               disabled={user === undefined}
               onClick={() => {
                 setAuthError("");
+                setAuthMode("login");
                 setAuthOpen(true);
               }}
             >
@@ -804,6 +836,10 @@ export default function App() {
                     type="button"
                     key={suggestion.number}
                     onClick={() => {
+                      if (authRequired && !user) {
+                        setAuthOpen(true);
+                        return;
+                      }
                       setInput(suggestion.prompt);
                       requestAnimationFrame(() => textareaRef.current?.focus());
                     }}
@@ -843,10 +879,14 @@ export default function App() {
               ref={textareaRef}
               rows="1"
               maxLength="32000"
-              placeholder="메시지를 입력하세요"
+              placeholder={
+                authRequired && !user
+                  ? "로그인 후 메시지를 보낼 수 있어요"
+                  : "메시지를 입력하세요"
+              }
               aria-label="메시지"
               value={input}
-              disabled={generating}
+              disabled={generating || (authRequired && !user)}
               onChange={(event) => setInput(event.target.value)}
               onKeyDown={(event) => {
                 if (
@@ -867,7 +907,7 @@ export default function App() {
                 className="send-button"
                 type="submit"
                 aria-label="메시지 보내기"
-                disabled={generating || !input.trim()}
+                disabled={generating || !input.trim() || (authRequired && !user)}
               >
                 ↑
               </button>
@@ -883,6 +923,7 @@ export default function App() {
           mode={authMode}
           loading={authLoading}
           error={authError}
+          registrationAllowed={registrationAllowed}
           onClose={() => setAuthOpen(false)}
           onModeChange={(mode) => {
             setAuthMode(mode);

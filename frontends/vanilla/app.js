@@ -53,6 +53,8 @@ const state = {
   controller: null,
   user: undefined,
   authMode: "login",
+  authRequired: true,
+  registrationAllowed: true,
   syncStatus: "로컬 저장",
   syncTimer: null
 };
@@ -236,13 +238,27 @@ function renderAccount() {
   elements.storageMessage.textContent = "로그인 전 기록은 이 브라우저에 보관됩니다.";
 }
 
+function updateAccess() {
+  const blocked = state.authRequired && !state.user;
+  elements.input.disabled = state.generating || blocked;
+  elements.sendButton.disabled = state.generating || blocked;
+  elements.input.placeholder = blocked
+    ? "로그인 후 메시지를 보낼 수 있어요"
+    : "메시지를 입력하세요";
+}
+
 function render() {
   renderChats();
   renderMessages();
   renderAccount();
+  updateAccess();
 }
 
 function newChat() {
+  if (state.authRequired && !state.user) {
+    openAuth();
+    return null;
+  }
   const now = Date.now();
   const chat = {
     id: makeId(),
@@ -278,8 +294,7 @@ function deleteChat(chatId) {
 
 function setGenerating(value) {
   state.generating = value;
-  elements.input.disabled = value;
-  elements.sendButton.disabled = value;
+  updateAccess();
 }
 
 function scheduleSync() {
@@ -304,6 +319,7 @@ function scheduleSync() {
 }
 
 function setAuthMode(mode) {
+  if (mode === "register" && !state.registrationAllowed) return;
   state.authMode = mode;
   const register = mode === "register";
   elements.authTitle.textContent = register ? "계정 만들기" : "다시 만나서 반가워요";
@@ -315,6 +331,7 @@ function setAuthMode(mode) {
   elements.authSwitch.textContent = register
     ? "이미 계정이 있나요? 로그인"
     : "처음인가요? 계정 만들기";
+  elements.authSwitch.hidden = !register && !state.registrationAllowed;
   elements.authError.hidden = true;
 }
 
@@ -368,6 +385,7 @@ async function authenticate() {
     closeAuth();
     save();
     render();
+    loadModels();
   } catch (error) {
     elements.authError.textContent = error.message;
     elements.authError.hidden = false;
@@ -387,6 +405,7 @@ async function logout() {
   state.syncStatus = "로컬 저장";
   save();
   render();
+  loadModels();
 }
 
 async function restoreSession() {
@@ -419,6 +438,7 @@ async function restoreSession() {
     }
     save();
     render();
+    loadModels();
   } catch {
     state.user = null;
     state.syncStatus = "로컬 저장";
@@ -451,6 +471,10 @@ async function readStream(response, onDelta) {
 }
 
 async function sendMessage(content) {
+  if (state.authRequired && !state.user) {
+    openAuth();
+    return;
+  }
   if (!content.trim() || state.generating) return;
   const chat = activeChat() || newChat();
   const user = { id: makeId(), role: "user", content: content.trim(), createdAt: Date.now() };
@@ -529,7 +553,20 @@ async function loadModels() {
   try {
     const config = await (await fetch("/api/config")).json();
     state.defaultModel = config.defaultModel;
+    state.authRequired = config.authRequired !== false;
+    state.registrationAllowed = config.registrationAllowed !== false;
     elements.connectionDetail.textContent = new URL(config.apiBaseUrl).host;
+    if (state.authRequired && !state.user) {
+      state.selectedModel ||= state.defaultModel;
+      elements.selectedModel.textContent = state.selectedModel;
+      elements.connectionTitle.textContent = "로그인 필요";
+      elements.connectionDetail.textContent = "모델을 사용하려면 로그인하세요";
+      elements.statusDot.className = "status-dot offline";
+      renderModels();
+      renderAccount();
+      updateAccess();
+      return;
+    }
     const response = await fetch("/api/models");
     if (!response.ok) throw new Error("모델 목록을 불러오지 못했습니다");
     const payload = await response.json();
@@ -551,6 +588,7 @@ async function loadModels() {
   }
   elements.selectedModel.textContent = state.selectedModel;
   renderModels();
+  updateAccess();
   save();
 }
 
@@ -634,6 +672,10 @@ document.addEventListener("keydown", (event) => {
 });
 document.querySelectorAll(".suggestion").forEach((button) =>
   button.addEventListener("click", () => {
+    if (state.authRequired && !state.user) {
+      openAuth();
+      return;
+    }
     elements.input.value = button.dataset.prompt;
     elements.input.dispatchEvent(new Event("input"));
     elements.input.focus();

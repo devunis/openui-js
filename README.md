@@ -74,6 +74,8 @@ OpenAI 호환 규격을 제공하는 로컬 서버나 다른 서비스도 `API_B
 | `DATABASE_PATH` | `data/openui.db` | SQLite 데이터베이스 경로 |
 | `SESSION_TTL_DAYS` | `30` | 로그인 유지 기간 |
 | `COOKIE_SECURE` | `false` | HTTPS 배포 시 `true` |
+| `REQUIRE_AUTH` | `true` | 모델·채팅 API에 로그인 요구 |
+| `ALLOW_REGISTRATION` | `true` | 새 계정 가입 허용 |
 
 ## 개발
 
@@ -112,6 +114,8 @@ npm run check
 - 비밀번호는 PBKDF2-SHA256으로, 로그인 토큰은 SHA-256으로 해시해 저장합니다.
 - 로그인 쿠키는 HttpOnly와 SameSite=Lax로 제한됩니다.
 - 사용자별 대화 소유권은 모든 저장 API에서 서버가 확인합니다.
+- 모델·채팅 API는 기본적으로 로그인한 사용자만 호출할 수 있습니다.
+- 첫 운영 계정을 만든 뒤 `ALLOW_REGISTRATION=false`로 설정하면 추가 가입을 막을 수 있습니다.
 - 이 앱은 개인/로컬 사용을 위한 경량 구현입니다.
 - 외부에 공개하려면 인증, 요청 제한, HTTPS를 앞단에 추가하세요.
 

@@ -14,7 +14,17 @@ def mock_client(handler):
 @pytest.fixture(autouse=True)
 def isolated_database(tmp_path, monkeypatch):
     monkeypatch.setattr(main.database, "DATABASE_PATH", tmp_path / "test.db")
+    monkeypatch.setattr(main.settings, "require_auth", True)
+    monkeypatch.setattr(main.settings, "allow_registration", True)
     main.database.init_db()
+
+
+def register_client(client, email="hello@example.com"):
+    response = client.post(
+        "/api/auth/register",
+        json={"email": email, "password": "correct-horse"},
+    )
+    assert response.status_code == 201
 
 
 def test_config_does_not_expose_api_key(monkeypatch):
@@ -29,6 +39,8 @@ def test_config_does_not_expose_api_key(monkeypatch):
         "apiBaseUrl": "http://model.test/v1",
         "defaultModel": "tiny-model",
         "hasApiKey": True,
+        "authRequired": True,
+        "registrationAllowed": True,
     }
     assert "secret-token" not in response.text
 
@@ -40,8 +52,10 @@ def test_models_are_proxied(monkeypatch):
 
     monkeypatch.setattr(main.settings, "api_base_url", "http://model.test/v1")
     monkeypatch.setattr(main, "get_http_client", lambda: mock_client(handler))
+    client = TestClient(main.app)
+    register_client(client)
 
-    response = TestClient(main.app).get("/api/models")
+    response = client.get("/api/models")
 
     assert response.status_code == 200
     assert response.json() == {"data": [{"id": "model-a"}]}
@@ -60,8 +74,10 @@ def test_chat_completions_stream(monkeypatch):
 
     monkeypatch.setattr(main.settings, "api_base_url", "http://model.test/v1")
     monkeypatch.setattr(main, "get_http_client", lambda: mock_client(handler))
+    client = TestClient(main.app)
+    register_client(client)
 
-    with TestClient(main.app).stream(
+    with client.stream(
         "POST",
         "/api/chat/completions",
         json={
@@ -75,7 +91,9 @@ def test_chat_completions_stream(monkeypatch):
 
 
 def test_invalid_chat_payload_is_rejected():
-    response = TestClient(main.app).post(
+    client = TestClient(main.app)
+    register_client(client)
+    response = client.post(
         "/api/chat/completions",
         json={"model": "", "messages": []},
     )
@@ -117,6 +135,17 @@ def test_duplicate_registration_and_invalid_login():
     )
 
     assert invalid.status_code == 401
+
+
+def test_registration_can_be_disabled(monkeypatch):
+    monkeypatch.setattr(main.settings, "allow_registration", False)
+
+    response = TestClient(main.app).post(
+        "/api/auth/register",
+        json={"email": "hello@example.com", "password": "correct-horse"},
+    )
+
+    assert response.status_code == 403
 
 
 def test_chats_are_persisted_and_isolated_by_user():
@@ -166,6 +195,14 @@ def test_chat_storage_requires_authentication():
     assert client.get("/api/chats").status_code == 401
     assert client.post("/api/chats/sync", json={"chats": []}).status_code == 401
     assert client.delete("/api/chats/missing").status_code == 401
+    assert client.get("/api/models").status_code == 401
+    assert client.post(
+        "/api/chat/completions",
+        json={
+            "model": "model-a",
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+    ).status_code == 401
 
 
 def test_built_frontends_are_served():

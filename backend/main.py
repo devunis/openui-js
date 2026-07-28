@@ -33,6 +33,16 @@ class Settings:
         self.api_key = os.getenv("OPENAI_API_KEY", "")
         self.default_model = os.getenv("DEFAULT_MODEL", "llama3.2")
         self.session_ttl_days = int(os.getenv("SESSION_TTL_DAYS", "30"))
+        self.require_auth = os.getenv("REQUIRE_AUTH", "true").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        self.allow_registration = os.getenv("ALLOW_REGISTRATION", "true").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
 
 
 class Message(BaseModel):
@@ -140,6 +150,14 @@ def current_user(
     return user
 
 
+def model_access(
+    session_token: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE),
+) -> Optional[dict[str, object]]:
+    if not settings.require_auth:
+        return None
+    return current_user(session_token)
+
+
 def set_session_cookie(response: FastAPIResponse, user_id: str) -> None:
     token = create_session_token()
     max_age = settings.session_ttl_days * 24 * 60 * 60
@@ -170,11 +188,15 @@ async def config() -> dict[str, object]:
         "apiBaseUrl": settings.api_base_url,
         "defaultModel": settings.default_model,
         "hasApiKey": bool(settings.api_key),
+        "authRequired": settings.require_auth,
+        "registrationAllowed": settings.allow_registration,
     }
 
 
 @app.post("/api/auth/register", status_code=201)
 async def register(credentials: Credentials, response: FastAPIResponse) -> dict[str, object]:
+    if not settings.allow_registration:
+        raise HTTPException(status_code=403, detail="새 계정 가입이 비활성화되어 있습니다.")
     try:
         user = database.create_user(
             credentials.email,
@@ -252,7 +274,7 @@ async def remove_chat(
 
 
 @app.get("/api/models")
-async def models() -> Response:
+async def models(_user: Optional[dict[str, object]] = Depends(model_access)) -> Response:
     try:
         async with get_http_client() as client:
             upstream = await client.get(
@@ -272,7 +294,10 @@ async def models() -> Response:
 
 
 @app.post("/api/chat/completions")
-async def chat_completions(payload: ChatRequest) -> Response:
+async def chat_completions(
+    payload: ChatRequest,
+    _user: Optional[dict[str, object]] = Depends(model_access),
+) -> Response:
     client = get_http_client()
     request = client.build_request(
         "POST",
