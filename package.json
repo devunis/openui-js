@@ -1,7 +1,7 @@
 {
   "name": "openui-js",
   "version": "1.0.0",
-  "description": "A React frontend and FastAPI backend for OpenAI-compatible APIs and Ollama.",
+  "description": "React and vanilla JavaScript chat UIs with a shared FastAPI backend.",
   "type": "module",
   "private": true,
   "scripts": {
