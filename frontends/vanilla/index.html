@@ -30,6 +30,7 @@
         </div>
         <nav class="chat-list" id="chatList" aria-label="최근 대화"></nav>
         <div class="sidebar-footer">
+          <div id="accountArea"></div>
           <div class="connection-card">
             <span class="status-dot" id="statusDot" aria-hidden="true"></span>
             <div>
@@ -77,7 +78,7 @@
             <h1>무엇을 같이<br /><em>만들어볼까요?</em></h1>
             <p class="hero-copy">
               Ollama 또는 OpenAI 호환 모델과 대화하세요.<br />
-              기록은 이 브라우저에만 안전하게 보관됩니다.
+              <span id="storageMessage">로그인 전 기록은 이 브라우저에 보관됩니다.</span>
             </p>
             <div class="suggestion-grid">
               <button class="suggestion" type="button" data-prompt="오늘 집중할 일을 우선순위별로 정리해줘">
@@ -119,6 +120,50 @@
           <p class="disclaimer">AI는 실수할 수 있습니다. 중요한 정보는 한 번 더 확인하세요.</p>
         </footer>
       </main>
+    </div>
+
+    <div class="modal-backdrop" id="authModal" hidden>
+      <section
+        class="auth-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="authTitle"
+      >
+        <button class="modal-close" id="authClose" type="button" aria-label="닫기">×</button>
+        <span class="hero-mark" aria-hidden="true"><i></i><i></i></span>
+        <p class="eyebrow">PRIVATE SYNC</p>
+        <h2 id="authTitle">다시 만나서 반가워요</h2>
+        <p class="auth-copy" id="authCopy">로그인하면 서버에 저장된 대화를 불러옵니다.</p>
+        <form class="auth-form" id="authForm">
+          <label>
+            이메일
+            <input
+              id="authEmail"
+              type="email"
+              autocomplete="email"
+              required
+              placeholder="you@example.com"
+            />
+          </label>
+          <label>
+            비밀번호
+            <input
+              id="authPassword"
+              type="password"
+              autocomplete="current-password"
+              minlength="8"
+              maxlength="128"
+              required
+              placeholder="8자 이상"
+            />
+          </label>
+          <p class="auth-error" id="authError" hidden></p>
+          <button class="auth-submit" id="authSubmit" type="submit">로그인</button>
+        </form>
+        <button class="auth-switch" id="authSwitch" type="button">
+          처음인가요? 계정 만들기
+        </button>
+      </section>
     </div>
 
     <template id="messageTemplate">

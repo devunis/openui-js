@@ -8,3 +8,4 @@ __pycache__/
 coverage/
 npm-debug.log*
 work/
+data/

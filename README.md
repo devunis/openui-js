@@ -10,6 +10,8 @@ Svelte 없이 **React와 바닐라 JavaScript 두 가지 프런트엔드**를 �
 - 프레임워크 없는 바닐라 JavaScript 프런트엔드
 - 두 UI가 같은 FastAPI와 기능·디자인을 공유
 - Python/FastAPI 스트리밍 프록시
+- 이메일 회원가입·로그인과 HttpOnly 세션
+- 사용자별 SQLite 대화 저장·동기화
 - OpenAI 호환 `/v1` API 지원
 - Ollama의 OpenAI 호환 API 지원
 - 실시간 스트리밍 응답
@@ -69,6 +71,9 @@ OpenAI 호환 규격을 제공하는 로컬 서버나 다른 서비스도 `API_B
 | `DEFAULT_MODEL` | `llama3.2` | 기본 모델 |
 | `PORT` | `8000` | 백엔드 포트 |
 | `HOST` | `127.0.0.1` | 백엔드 바인딩 주소 |
+| `DATABASE_PATH` | `data/openui.db` | SQLite 데이터베이스 경로 |
+| `SESSION_TTL_DAYS` | `30` | 로그인 유지 기간 |
+| `COOKIE_SECURE` | `false` | HTTPS 배포 시 `true` |
 
 ## 개발
 
@@ -90,6 +95,8 @@ npm run check
 .
 ├── backend/
 │   ├── main.py         # FastAPI + OpenAI 호환 스트리밍 프록시
+│   ├── database.py     # SQLite 사용자·세션·대화 저장소
+│   ├── security.py     # 비밀번호와 세션 토큰 보안
 │   └── test_main.py    # 백엔드 API 테스트
 ├── frontends/
 │   ├── react/          # React 구현
@@ -102,6 +109,9 @@ npm run check
 ## 보안 참고
 
 - API 키는 서버 프로세스에만 전달되고 브라우저 응답에는 포함되지 않습니다.
+- 비밀번호는 PBKDF2-SHA256으로, 로그인 토큰은 SHA-256으로 해시해 저장합니다.
+- 로그인 쿠키는 HttpOnly와 SameSite=Lax로 제한됩니다.
+- 사용자별 대화 소유권은 모든 저장 API에서 서버가 확인합니다.
 - 이 앱은 개인/로컬 사용을 위한 경량 구현입니다.
 - 외부에 공개하려면 인증, 요청 제한, HTTPS를 앞단에 추가하세요.
 
