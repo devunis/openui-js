@@ -67,6 +67,7 @@ const elements = {
   newChat: $("#newChat"),
   openSidebar: $("#openSidebar"),
   pendingImages: $("#pendingImages"),
+  providerSelect: $("#providerSelect"),
   selectedModel: $("#selectedModel"),
   selectedKnowledgeCount: $("#selectedKnowledgeCount"),
   sendButton: $("#sendButton"),
@@ -76,6 +77,8 @@ const elements = {
   themeButton: $("#themeButton"),
   themeIcon: $("#themeIcon"),
   themeLabel: $("#themeLabel"),
+  toolChip: $("#toolChip"),
+  toolCount: $("#toolCount"),
   uploadButton: $("#uploadButton"),
   uploadLabel: $("#uploadLabel"),
   webChip: $("#webChip")
@@ -85,8 +88,10 @@ const state = {
   chats: [],
   activeChatId: null,
   selectedModel: "",
+  selectedProvider: "default",
   defaultModel: "llama3.2",
   models: [],
+  providers: [],
   generating: false,
   controller: null,
   user: undefined,
@@ -101,6 +106,8 @@ const state = {
   memoryEnabled: true,
   memoriesAvailable: true,
   webAvailable: false,
+  toolsAvailable: false,
+  toolCount: 0,
   pendingImages: [],
   chatSearch: "",
   showArchived: false,
@@ -118,6 +125,7 @@ function load() {
     state.chats = Array.isArray(saved.chats) ? saved.chats : [];
     state.activeChatId = saved.activeChatId || state.chats[0]?.id || null;
     state.selectedModel = saved.selectedModel || "";
+    state.selectedProvider = saved.selectedProvider || "default";
   } catch {
     localStorage.removeItem(STORAGE_KEY);
   }
@@ -129,7 +137,8 @@ function save() {
     JSON.stringify({
       chats: state.user ? [] : state.chats,
       activeChatId: state.user ? null : state.activeChatId,
-      selectedModel: state.selectedModel
+      selectedModel: state.selectedModel,
+      selectedProvider: state.selectedProvider
     })
   );
 }
@@ -143,8 +152,10 @@ function normalizeChat(chat) {
     ...chat,
     title: chat.title || "새 대화",
     model: chat.model || state.selectedModel || state.defaultModel,
+    providerId: chat.providerId || "default",
     useMemory: chat.useMemory !== false,
     useWeb: chat.useWeb === true,
+    useTools: chat.useTools === true,
     archived: chat.archived === true,
     createdAt: chat.createdAt || Date.now(),
     updatedAt: chat.updatedAt || chat.createdAt || Date.now(),
@@ -152,7 +163,8 @@ function normalizeChat(chat) {
       ? chat.messages.map((message) => ({
           ...message,
           sources: Array.isArray(message.sources) ? message.sources : [],
-          attachments: Array.isArray(message.attachments) ? message.attachments : []
+          attachments: Array.isArray(message.attachments) ? message.attachments : [],
+          toolEvents: Array.isArray(message.toolEvents) ? message.toolEvents : []
         }))
       : []
   };
@@ -242,6 +254,20 @@ function renderMessage(message, streaming = false) {
     sources.append(link);
   }
   sources.hidden = !sources.childElementCount;
+  if (message.toolEvents?.length) {
+    const eventList = document.createElement("div");
+    eventList.className = "tool-event-list";
+    eventList.setAttribute("aria-label", "도구 실행 기록");
+    for (const event of message.toolEvents) {
+      const item = document.createElement("span");
+      item.className = event.status;
+      const badge = document.createElement("b");
+      badge.textContent = event.status === "success" ? "✓" : "!";
+      item.append(badge, document.createTextNode(event.name));
+      eventList.append(item);
+    }
+    sources.after(eventList);
+  }
   copy.addEventListener("click", async () => {
     await navigator.clipboard.writeText(message.content);
     copy.textContent = "복사됨";
@@ -289,6 +315,10 @@ function renderChats() {
     button.querySelector(".chat-title").textContent = chat.title;
     button.addEventListener("click", () => {
       state.activeChatId = chat.id;
+      state.selectedProvider = chat.providerId || "default";
+      state.selectedModel = chat.model || state.defaultModel;
+      elements.providerSelect.value = state.selectedProvider;
+      elements.selectedModel.textContent = state.selectedModel;
       save();
       render();
       closeSidebar();
@@ -343,9 +373,14 @@ function renderPendingImages() {
 
 function renderWeb() {
   const enabled = state.webAvailable && activeChat()?.useWeb === true;
+  const toolsEnabled = state.toolsAvailable && activeChat()?.useTools === true;
   elements.webChip.hidden = !state.webAvailable;
   elements.webChip.classList.toggle("active", enabled);
   elements.webChip.setAttribute("aria-pressed", String(enabled));
+  elements.toolChip.hidden = !state.toolsAvailable;
+  elements.toolChip.classList.toggle("active", toolsEnabled);
+  elements.toolChip.setAttribute("aria-pressed", String(toolsEnabled));
+  elements.toolCount.textContent = state.toolCount;
   const memoryActive =
     state.memoriesAvailable &&
     (activeChat()?.useMemory ?? state.memoryEnabled) &&
@@ -353,7 +388,11 @@ function renderWeb() {
   const knowledgeActive =
     state.knowledgeEnabled && state.selectedDocumentIds.length > 0;
   elements.composerHint.hidden =
-    enabled || memoryActive || knowledgeActive || state.pendingImages.length > 0;
+    enabled ||
+    toolsEnabled ||
+    memoryActive ||
+    knowledgeActive ||
+    state.pendingImages.length > 0;
 }
 
 function renderAccount() {
@@ -722,8 +761,10 @@ function newChat() {
     id: makeId(),
     title: "새 대화",
     model: state.selectedModel || state.defaultModel,
+    providerId: state.selectedProvider,
     useMemory: state.memoryEnabled,
     useWeb: false,
+    useTools: false,
     archived: false,
     createdAt: now,
     updatedAt: now,
@@ -916,7 +957,7 @@ async function restoreSession() {
   }
 }
 
-async function readStream(response, onDelta, onSources) {
+async function readStream(response, onDelta, onSources, onTools) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -932,6 +973,7 @@ async function readStream(response, onDelta, onSources) {
       try {
         const event = JSON.parse(data);
         if (Array.isArray(event.openui?.sources)) onSources(event.openui.sources);
+        if (Array.isArray(event.openui?.toolEvents)) onTools(event.openui.toolEvents);
         const delta = event.choices?.[0]?.delta?.content;
         if (delta) onDelta(delta);
       } catch {
@@ -955,6 +997,7 @@ async function sendMessage(content) {
     content: content.trim(),
     sources: [],
     attachments: [...state.pendingImages],
+    toolEvents: [],
     createdAt: Date.now()
   };
   const assistant = {
@@ -963,11 +1006,13 @@ async function sendMessage(content) {
     content: "",
     sources: [],
     attachments: [],
+    toolEvents: [],
     createdAt: Date.now()
   };
   const requestMessages = [...chat.messages, user];
   chat.messages.push(user, assistant);
   chat.model = state.selectedModel || state.defaultModel;
+  chat.providerId = state.selectedProvider;
   chat.updatedAt = Date.now();
   if (chat.messages.length === 2) {
     chat.title = (content.trim() || state.pendingImages[0]?.name || "이미지 대화")
@@ -986,6 +1031,7 @@ async function sendMessage(content) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         model: state.selectedModel || state.defaultModel,
+        providerId: state.selectedProvider,
         messages: requestMessages.map(({ role, content: text, attachments }) => ({
           role,
           content: text,
@@ -995,7 +1041,8 @@ async function sendMessage(content) {
         useKnowledge: state.knowledgeEnabled && state.selectedDocumentIds.length > 0,
         documentIds: state.selectedDocumentIds,
         useMemory: state.memoriesAvailable && chat.useMemory !== false,
-        useWeb: state.webAvailable && chat.useWeb === true
+        useWeb: state.webAvailable && chat.useWeb === true,
+        useTools: state.toolsAvailable && chat.useTools === true
       }),
       signal: state.controller.signal
     });
@@ -1013,6 +1060,10 @@ async function sendMessage(content) {
       },
       (sources) => {
         assistant.sources = sources;
+        renderMessages();
+      },
+      (toolEvents) => {
+        assistant.toolEvents = toolEvents;
         renderMessages();
       }
     );
@@ -1055,6 +1106,18 @@ function renderModels() {
   }
 }
 
+function renderProviders() {
+  elements.providerSelect.replaceChildren();
+  for (const provider of state.providers) {
+    const option = document.createElement("option");
+    option.value = provider.id;
+    option.textContent = provider.name;
+    elements.providerSelect.append(option);
+  }
+  elements.providerSelect.value = state.selectedProvider;
+  elements.providerSelect.hidden = state.providers.length <= 1;
+}
+
 async function loadModels() {
   try {
     const config = await (await fetch("/api/config")).json();
@@ -1063,6 +1126,15 @@ async function loadModels() {
     state.registrationAllowed = config.registrationAllowed !== false;
     state.memoriesAvailable = config.memoriesEnabled !== false;
     state.webAvailable = config.webSearchEnabled === true;
+    state.toolsAvailable = config.toolsEnabled === true;
+    state.providers = Array.isArray(config.providers) ? config.providers : [];
+    if (!state.providers.some((provider) => provider.id === state.selectedProvider)) {
+      state.selectedProvider = state.providers[0]?.id || "default";
+    }
+    const provider = state.providers.find(
+      (item) => item.id === state.selectedProvider
+    );
+    renderProviders();
     renderMessages();
     renderMemories();
     renderWeb();
@@ -1078,7 +1150,9 @@ async function loadModels() {
       updateAccess();
       return;
     }
-    const response = await fetch("/api/models");
+    const response = await fetch(
+      `/api/models?providerId=${encodeURIComponent(state.selectedProvider)}`
+    );
     if (!response.ok) throw new Error("모델 목록을 불러오지 못했습니다");
     const payload = await response.json();
     state.models = Array.isArray(payload.data)
@@ -1086,9 +1160,16 @@ async function loadModels() {
       : [];
     state.selectedModel =
       (state.models.includes(state.selectedModel) && state.selectedModel) ||
-      (state.models.includes(state.defaultModel) && state.defaultModel) ||
+      (state.models.includes(provider?.defaultModel) && provider.defaultModel) ||
       state.models[0] ||
+      provider?.defaultModel ||
       state.defaultModel;
+    if (state.toolsAvailable) {
+      const toolsResponse = await fetch("/api/tools");
+      const toolsPayload = toolsResponse.ok ? await toolsResponse.json() : { tools: [] };
+      state.toolCount = toolsPayload.tools?.length || 0;
+      renderWeb();
+    }
     elements.connectionTitle.textContent = "모델 서버 연결됨";
     elements.statusDot.className = "status-dot online";
   } catch (error) {
@@ -1188,6 +1269,32 @@ elements.webChip.addEventListener("click", () => {
   save();
   renderWeb();
   scheduleSync();
+});
+elements.toolChip.addEventListener("click", () => {
+  const chat = activeChat() || newChat();
+  if (!chat) return;
+  chat.useTools = !chat.useTools;
+  chat.updatedAt = Date.now();
+  save();
+  renderWeb();
+  scheduleSync();
+});
+elements.providerSelect.addEventListener("change", () => {
+  state.selectedProvider = elements.providerSelect.value;
+  const provider = state.providers.find(
+    (item) => item.id === state.selectedProvider
+  );
+  state.selectedModel = provider?.defaultModel || state.defaultModel;
+  const chat = activeChat();
+  if (chat) {
+    chat.providerId = state.selectedProvider;
+    chat.model = state.selectedModel;
+    chat.updatedAt = Date.now();
+  }
+  elements.selectedModel.textContent = state.selectedModel;
+  save();
+  scheduleSync();
+  loadModels();
 });
 elements.input.addEventListener("input", () => {
   elements.input.style.height = "auto";

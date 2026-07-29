@@ -5,7 +5,8 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from backend import main, rag, web_search
+from backend import main, rag, tools, web_search
+from backend.providers import Provider, load_providers
 
 
 def mock_client(handler):
@@ -25,6 +26,9 @@ def isolated_database(tmp_path, monkeypatch):
     monkeypatch.setattr(main.settings, "web_search_url", "http://search.test")
     monkeypatch.setattr(main.settings, "web_search_api_key", "")
     monkeypatch.setattr(main.settings, "web_search_result_count", 5)
+    monkeypatch.setattr(main.settings, "enable_tools", True)
+    monkeypatch.setattr(main.settings, "extra_providers", [])
+    monkeypatch.setattr(main.settings, "mcp_servers", [])
     main.database.init_db()
 
 
@@ -61,6 +65,15 @@ def test_config_does_not_expose_api_key(monkeypatch):
         "registrationAllowed": True,
         "memoriesEnabled": True,
         "webSearchEnabled": False,
+        "toolsEnabled": True,
+        "providers": [
+            {
+                "id": "default",
+                "name": "Default",
+                "defaultModel": "tiny-model",
+                "hasApiKey": True,
+            }
+        ],
     }
     assert "secret-token" not in response.text
 
@@ -79,6 +92,38 @@ def test_models_are_proxied(monkeypatch):
 
     assert response.status_code == 200
     assert response.json() == {"data": [{"id": "model-a"}]}
+
+
+def test_selected_provider_routes_models_and_keeps_key_private(monkeypatch):
+    async def handler(request):
+        assert str(request.url) == "https://provider.test/v1/models"
+        assert request.headers["authorization"] == "Bearer provider-secret"
+        return httpx.Response(200, json={"data": [{"id": "provider-model"}]})
+
+    monkeypatch.setattr(
+        main.settings,
+        "extra_providers",
+        [
+            Provider(
+                id="secondary",
+                name="Secondary",
+                base_url="https://provider.test/v1",
+                api_key="provider-secret",
+                default_model="provider-model",
+            )
+        ],
+    )
+    monkeypatch.setattr(main, "get_http_client", lambda: mock_client(handler))
+    client = TestClient(main.app)
+    register_client(client)
+
+    config = client.get("/api/config")
+    response = client.get("/api/models?providerId=secondary")
+
+    assert response.status_code == 200
+    assert response.json()["data"][0]["id"] == "provider-model"
+    assert config.json()["providers"][1]["id"] == "secondary"
+    assert "provider-secret" not in config.text
 
 
 def test_chat_completions_stream(monkeypatch):
@@ -119,6 +164,78 @@ def test_invalid_chat_payload_is_rejected():
     )
 
     assert response.status_code == 422
+
+
+def test_builtin_tool_call_loop_returns_trace(monkeypatch):
+    calls = 0
+
+    async def handler(request):
+        nonlocal calls
+        calls += 1
+        body = json.loads(request.content)
+        assert body["stream"] is False
+        assert any(
+            tool["function"]["name"] == "builtin__calculator"
+            for tool in body["tools"]
+        )
+        if calls == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": "call-1",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "builtin__calculator",
+                                            "arguments": '{"expression":"2 + 3 * 4"}',
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                },
+            )
+        assert body["messages"][-1]["role"] == "tool"
+        assert '"14"' in body["messages"][-1]["content"]
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "The result is 14.",
+                        }
+                    }
+                ]
+            },
+        )
+
+    monkeypatch.setattr(main.settings, "api_base_url", "http://model.test/v1")
+    monkeypatch.setattr(main, "get_http_client", lambda: mock_client(handler))
+    client = TestClient(main.app)
+    register_client(client)
+
+    response = client.post(
+        "/api/chat/completions",
+        json={
+            "model": "model-a",
+            "messages": [{"role": "user", "content": "What is 2 + 3 * 4?"}],
+            "useTools": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert "builtin__calculator" in response.text
+    assert "The result is 14." in response.text
+    assert calls == 2
 
 
 def test_register_session_and_logout():
@@ -184,8 +301,10 @@ def test_chats_are_persisted_and_isolated_by_user():
         "id": "chat-1",
         "title": "Persist me",
         "model": "model-a",
+        "providerId": "provider-a",
         "useMemory": False,
         "useWeb": True,
+        "useTools": True,
         "archived": True,
         "createdAt": 100,
         "updatedAt": 200,
@@ -208,6 +327,13 @@ def test_chats_are_persisted_and_isolated_by_user():
                         "dataUrl": "data:image/png;base64,aGVsbG8=",
                     }
                 ],
+                "toolEvents": [
+                    {
+                        "name": "builtin__calculator",
+                        "status": "success",
+                        "result": '{"result":"4"}',
+                    }
+                ],
                 "createdAt": 150,
             }
         ],
@@ -217,10 +343,16 @@ def test_chats_are_persisted_and_isolated_by_user():
     assert sync.status_code == 200
     assert sync.json()["chats"][0]["messages"][0]["content"] == "hello"
     assert sync.json()["chats"][0]["useMemory"] is False
+    assert sync.json()["chats"][0]["providerId"] == "provider-a"
     assert sync.json()["chats"][0]["useWeb"] is True
+    assert sync.json()["chats"][0]["useTools"] is True
     assert sync.json()["chats"][0]["archived"] is True
     assert sync.json()["chats"][0]["messages"][0]["sources"][0]["title"] == "Example"
     assert sync.json()["chats"][0]["messages"][0]["attachments"][0]["name"] == "tiny.png"
+    assert (
+        sync.json()["chats"][0]["messages"][0]["toolEvents"][0]["name"]
+        == "builtin__calculator"
+    )
     assert first.get("/api/chats").json()["chats"][0]["id"] == "chat-1"
     assert second.get("/api/chats").json()["chats"] == []
 
@@ -766,6 +898,113 @@ def test_private_web_urls_are_blocked():
         web_search.assert_public_url("http://127.0.0.1/private")
 
 
+def test_provider_and_mcp_configuration_validation():
+    providers = load_providers(
+        json.dumps(
+            [
+                {
+                    "id": "cloud",
+                    "name": "Cloud",
+                    "baseUrl": "https://models.example/v1",
+                    "apiKey": "private",
+                    "defaultModel": "model-x",
+                }
+            ]
+        ),
+        default_base_url="http://localhost:11434/v1",
+        default_api_key="",
+        default_model="local",
+    )
+    servers = tools.load_mcp_servers(
+        json.dumps(
+            [
+                {
+                    "id": "docs",
+                    "name": "Docs",
+                    "url": "https://mcp.example/rpc",
+                    "headers": {"Authorization": "Bearer private"},
+                    "allowedTools": ["search"],
+                }
+            ]
+        )
+    )
+
+    assert providers[1].public()["hasApiKey"] is True
+    assert "private" not in json.dumps(providers[1].public())
+    assert servers[0].allowed_tools == ("search",)
+    assert tools.calculate("2 + 3 * 4") == "14"
+    with pytest.raises(tools.ToolError):
+        tools.calculate("__import__('os').system('id')")
+
+
+def test_mcp_discovery_exposes_only_allowlisted_tools(monkeypatch):
+    async def handler(request):
+        payload = json.loads(request.content)
+        if payload["method"] == "initialize":
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {"protocolVersion": "2025-03-26"},
+                },
+                headers={"mcp-session-id": "session-1"},
+            )
+        if payload["method"] == "notifications/initialized":
+            assert request.headers["mcp-session-id"] == "session-1"
+            return httpx.Response(202)
+        assert payload["method"] == "tools/list"
+        return httpx.Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": 2,
+                "result": {
+                    "tools": [
+                        {
+                            "name": "search",
+                            "description": "Search docs",
+                            "inputSchema": {"type": "object", "properties": {}},
+                        },
+                        {
+                            "name": "delete_all",
+                            "description": "Dangerous",
+                            "inputSchema": {"type": "object", "properties": {}},
+                        },
+                    ]
+                },
+            },
+        )
+
+    servers = tools.load_mcp_servers(
+        json.dumps(
+            [
+                {
+                    "id": "docs",
+                    "url": "https://mcp.example/rpc",
+                    "allowedTools": ["search"],
+                }
+            ]
+        )
+    )
+    monkeypatch.setattr(main.settings, "mcp_servers", servers)
+    real_async_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        tools.httpx,
+        "AsyncClient",
+        lambda **_kwargs: real_async_client(transport=httpx.MockTransport(handler)),
+    )
+    client = TestClient(main.app)
+    register_client(client)
+
+    response = client.get("/api/tools")
+    names = [item["name"] for item in response.json()["tools"]]
+
+    assert response.status_code == 200
+    assert "mcp_docs__search" in names
+    assert all("delete_all" not in name for name in names)
+
+
 def test_init_db_migrates_legacy_chats_for_memory_toggle(tmp_path, monkeypatch):
     legacy_path = tmp_path / "legacy.db"
     connection = sqlite3.connect(legacy_path)
@@ -796,8 +1035,14 @@ def test_init_db_migrates_legacy_chats_for_memory_toggle(tmp_path, monkeypatch):
             row["name"]
             for row in migrated.execute("PRAGMA table_info(messages)").fetchall()
         }
-    assert {"use_memory", "use_web", "archived"}.issubset(columns)
-    assert {"sources_json", "attachments_json"}.issubset(message_columns)
+    assert {
+        "provider_id",
+        "use_memory",
+        "use_web",
+        "use_tools",
+        "archived",
+    }.issubset(columns)
+    assert {"sources_json", "attachments_json", "tools_json"}.issubset(message_columns)
 
 
 def test_built_frontends_are_served():

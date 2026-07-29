@@ -98,8 +98,10 @@ def init_db() -> None:
                 user_id TEXT NOT NULL,
                 title TEXT NOT NULL,
                 model TEXT NOT NULL,
+                provider_id TEXT NOT NULL DEFAULT 'default',
                 use_memory INTEGER NOT NULL DEFAULT 1,
                 use_web INTEGER NOT NULL DEFAULT 0,
+                use_tools INTEGER NOT NULL DEFAULT 0,
                 archived INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
@@ -116,6 +118,7 @@ def init_db() -> None:
                 content TEXT NOT NULL,
                 sources_json TEXT NOT NULL DEFAULT '[]',
                 attachments_json TEXT NOT NULL DEFAULT '[]',
+                tools_json TEXT NOT NULL DEFAULT '[]',
                 created_at INTEGER NOT NULL,
                 position INTEGER NOT NULL,
                 FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE
@@ -178,9 +181,17 @@ def init_db() -> None:
             connection.execute(
                 "ALTER TABLE chats ADD COLUMN use_memory INTEGER NOT NULL DEFAULT 1"
             )
+        if "provider_id" not in chat_columns:
+            connection.execute(
+                "ALTER TABLE chats ADD COLUMN provider_id TEXT NOT NULL DEFAULT 'default'"
+            )
         if "use_web" not in chat_columns:
             connection.execute(
                 "ALTER TABLE chats ADD COLUMN use_web INTEGER NOT NULL DEFAULT 0"
+            )
+        if "use_tools" not in chat_columns:
+            connection.execute(
+                "ALTER TABLE chats ADD COLUMN use_tools INTEGER NOT NULL DEFAULT 0"
             )
         if "archived" not in chat_columns:
             connection.execute(
@@ -197,6 +208,10 @@ def init_db() -> None:
         if "attachments_json" not in message_columns:
             connection.execute(
                 "ALTER TABLE messages ADD COLUMN attachments_json TEXT NOT NULL DEFAULT '[]'"
+            )
+        if "tools_json" not in message_columns:
+            connection.execute(
+                "ALTER TABLE messages ADD COLUMN tools_json TEXT NOT NULL DEFAULT '[]'"
             )
 
 
@@ -263,7 +278,7 @@ def delete_session(token_hash: str) -> None:
 def _chat_from_row(connection: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
     messages = connection.execute(
         """
-        SELECT id, role, content, sources_json, attachments_json, created_at
+        SELECT id, role, content, sources_json, attachments_json, tools_json, created_at
         FROM messages
         WHERE chat_id = ?
         ORDER BY position ASC
@@ -274,8 +289,10 @@ def _chat_from_row(connection: sqlite3.Connection, row: sqlite3.Row) -> dict[str
         "id": row["id"],
         "title": row["title"],
         "model": row["model"],
+        "providerId": row["provider_id"],
         "useMemory": bool(row["use_memory"]),
         "useWeb": bool(row["use_web"]),
+        "useTools": bool(row["use_tools"]),
         "archived": bool(row["archived"]),
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
@@ -286,6 +303,7 @@ def _chat_from_row(connection: sqlite3.Connection, row: sqlite3.Row) -> dict[str
                 "content": message["content"],
                 "sources": json.loads(message["sources_json"] or "[]"),
                 "attachments": json.loads(message["attachments_json"] or "[]"),
+                "toolEvents": json.loads(message["tools_json"] or "[]"),
                 "createdAt": message["created_at"],
             }
             for message in messages
@@ -297,7 +315,8 @@ def list_chats(user_id: str) -> list[dict[str, Any]]:
     with connect() as connection:
         rows = connection.execute(
             """
-            SELECT id, title, model, use_memory, use_web, archived, created_at, updated_at
+            SELECT id, title, model, provider_id, use_memory, use_web, use_tools,
+                archived, created_at, updated_at
             FROM chats
             WHERE user_id = ?
             ORDER BY updated_at DESC
@@ -319,18 +338,22 @@ def upsert_chat(user_id: str, chat: dict[str, Any]) -> None:
         connection.execute(
             """
             INSERT INTO chats (
-                id, user_id, title, model, use_memory, use_web, archived,
+                id, user_id, title, model, provider_id, use_memory, use_web,
+                use_tools, archived,
                 created_at, updated_at
             )
             VALUES (
-                :id, :user_id, :title, :model, :use_memory, :use_web, :archived,
+                :id, :user_id, :title, :model, :provider_id, :use_memory,
+                :use_web, :use_tools, :archived,
                 :created_at, :updated_at
             )
             ON CONFLICT(id) DO UPDATE SET
                 title = excluded.title,
                 model = excluded.model,
+                provider_id = excluded.provider_id,
                 use_memory = excluded.use_memory,
                 use_web = excluded.use_web,
+                use_tools = excluded.use_tools,
                 archived = excluded.archived,
                 updated_at = excluded.updated_at
             """,
@@ -339,8 +362,10 @@ def upsert_chat(user_id: str, chat: dict[str, Any]) -> None:
                 "user_id": user_id,
                 "title": chat["title"],
                 "model": chat["model"],
+                "provider_id": chat["providerId"],
                 "use_memory": int(chat["useMemory"]),
                 "use_web": int(chat["useWeb"]),
+                "use_tools": int(chat["useTools"]),
                 "archived": int(chat["archived"]),
                 "created_at": chat["createdAt"],
                 "updated_at": chat["updatedAt"],
@@ -351,9 +376,9 @@ def upsert_chat(user_id: str, chat: dict[str, Any]) -> None:
             """
             INSERT INTO messages (
                 id, chat_id, role, content, sources_json, attachments_json,
-                created_at, position
+                tools_json, created_at, position
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -363,6 +388,7 @@ def upsert_chat(user_id: str, chat: dict[str, Any]) -> None:
                     message["content"],
                     json.dumps(message.get("sources", []), ensure_ascii=False),
                     json.dumps(message.get("attachments", []), ensure_ascii=False),
+                    json.dumps(message.get("toolEvents", []), ensure_ascii=False),
                     message["createdAt"],
                     position,
                 )
@@ -384,7 +410,8 @@ def get_chat(user_id: str, chat_id: str) -> dict[str, Any] | None:
     with connect() as connection:
         row = connection.execute(
             """
-            SELECT id, title, model, use_memory, use_web, archived, created_at, updated_at
+            SELECT id, title, model, provider_id, use_memory, use_web, use_tools,
+                archived, created_at, updated_at
             FROM chats
             WHERE id = ? AND user_id = ?
             """,
@@ -400,8 +427,9 @@ def search_chats(user_id: str, query: str, include_archived: bool = True) -> lis
         rows = connection.execute(
             f"""
             SELECT DISTINCT
-                chats.id, chats.title, chats.model, chats.use_memory, chats.use_web,
-                chats.archived, chats.created_at, chats.updated_at
+                chats.id, chats.title, chats.model, chats.provider_id,
+                chats.use_memory, chats.use_web, chats.use_tools, chats.archived,
+                chats.created_at, chats.updated_at
             FROM chats
             LEFT JOIN messages ON messages.chat_id = chats.id
             WHERE chats.user_id = ?
