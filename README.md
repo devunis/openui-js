@@ -15,6 +15,9 @@ Svelte 없이 **React와 바닐라 JavaScript 두 가지 프런트엔드**를 �
 - TXT·Markdown·PDF 문서 업로드와 사용자별 지식 저장소
 - SQLite FTS5 기반 관련 문서 검색과 출처 태그 RAG
 - 사용자별 장기 메모리 저장·편집·검색과 채팅 컨텍스트 주입
+- 선택형 실시간 웹 검색과 답변별 클릭 가능한 출처
+- 이미지 첨부를 OpenAI 호환 멀티모달 메시지로 전달
+- 대화 본문 검색, 보관함, Markdown/JSON 내보내기
 - OpenAI 호환 `/v1` API 지원
 - Ollama의 OpenAI 호환 API 지원
 - 실시간 스트리밍 응답
@@ -82,6 +85,11 @@ OpenAI 호환 규격을 제공하는 로컬 서버나 다른 서비스도 `API_B
 | `ENABLE_MEMORIES` | `true` | 사용자 메모리 기능 활성화 |
 | `MEMORY_USER_CHAR_LIMIT` | `2000` | 채팅에 주입할 사용자 정보·선호 최대 글자 수 |
 | `MEMORY_CONTEXT_CHAR_LIMIT` | `2000` | 검색해 주입할 장기 맥락 최대 글자 수 |
+| `ENABLE_WEB_SEARCH` | `false` | 웹 검색·URL 가져오기 API 활성화 |
+| `WEB_SEARCH_PROVIDER` | `external` | `external` JSON POST 또는 `searxng` |
+| `WEB_SEARCH_URL` | 빈 값 | 검색 서비스 엔드포인트 |
+| `WEB_SEARCH_API_KEY` | 빈 값 | 검색 서비스 서버 측 인증 키 |
+| `WEB_SEARCH_RESULT_COUNT` | `5` | 질문당 검색 결과 수(최대 10) |
 
 ## 개발
 
@@ -113,6 +121,14 @@ npm run check
 
 메모리는 계정별로 격리되며 비밀번호, API 키, 인증 토큰 등 민감정보는 저장하지 않는 것을 권장합니다. 모든 메모리는 관리 화면에서 한 번에 초기화할 수 있습니다.
 
+## 웹 검색과 이미지
+
+웹 검색을 사용하려면 `ENABLE_WEB_SEARCH=true`와 검색 엔드포인트를 설정합니다. `searxng`는 JSON 검색 URL에 GET 요청을 보내며, `external`은 `{"query":"...","count":5}` 형태의 JSON POST API를 사용합니다. 브라우저에는 검색 서비스 키가 노출되지 않습니다.
+
+채팅 입력창에서 **웹 검색**을 켜면 최신 검색 스니펫이 신뢰할 수 없는 참고 자료로 모델에 전달되고, 응답 아래에 원문 링크가 표시됩니다. **이미지** 버튼으로 PNG, JPEG, WebP, GIF를 최대 3개, 파일당 2MB까지 첨부할 수 있습니다. 선택한 모델 서버가 이미지 입력을 지원해야 합니다.
+
+사이드바 검색은 대화 제목과 본문을 함께 찾습니다. 대화를 보관함으로 옮기거나, 로그인 상태에서는 Markdown으로, 로컬 상태에서는 JSON으로 내보낼 수 있습니다.
+
 ## 구조
 
 ```text
@@ -122,6 +138,7 @@ npm run check
 │   ├── database.py     # SQLite 사용자·세션·대화·문서 저장소
 │   ├── rag.py          # 텍스트 추출·청킹·RAG 컨텍스트
 │   ├── memory.py       # 사용자 메모리 컨텍스트 생성
+│   ├── web_search.py   # 웹 검색·공개 URL 가져오기와 SSRF 차단
 │   ├── security.py     # 비밀번호와 세션 토큰 보안
 │   └── test_main.py    # 백엔드 API 테스트
 ├── frontends/
@@ -141,6 +158,8 @@ npm run check
 - 문서 목록·검색·삭제도 로그인 사용자별로 격리합니다.
 - 메모리 CRUD·검색 역시 로그인 사용자 소유권을 검사합니다.
 - 검색된 문서 내용은 신뢰할 수 없는 참고 데이터로 표시해 모델에 전달합니다.
+- 웹 페이지 가져오기는 HTTP(S)만 허용하고 사설·루프백·링크 로컬 주소와 리다이렉트를 검사합니다.
+- 이미지 첨부는 허용 MIME, 개수, 파일 크기를 서버에서 다시 검증합니다.
 - 모델·채팅 API는 기본적으로 로그인한 사용자만 호출할 수 있습니다.
 - 첫 운영 계정을 만든 뒤 `ALLOW_REGISTRATION=false`로 설정하면 추가 가입을 막을 수 있습니다.
 - 이 앱은 개인/로컬 사용을 위한 경량 구현입니다.

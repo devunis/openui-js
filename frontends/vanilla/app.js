@@ -16,8 +16,10 @@ const elements = {
   authSwitch: $("#authSwitch"),
   authTitle: $("#authTitle"),
   backdrop: $("#backdrop"),
+  archiveToggle: $("#archiveToggle"),
   chatCount: $("#chatCount"),
   chatList: $("#chatList"),
+  chatSearch: $("#chatSearch"),
   clearChat: $("#clearChat"),
   closeSidebar: $("#closeSidebar"),
   composer: $("#composer"),
@@ -29,6 +31,8 @@ const elements = {
   documentList: $("#documentList"),
   documentUpload: $("#documentUpload"),
   emptyState: $("#emptyState"),
+  exportChat: $("#exportChat"),
+  imageUpload: $("#imageUpload"),
   input: $("#messageInput"),
   knowledgeBackdrop: $("#knowledgeBackdrop"),
   knowledgeButton: $("#knowledgeButton"),
@@ -62,6 +66,7 @@ const elements = {
   modelPickerWrap: $("#modelPickerWrap"),
   newChat: $("#newChat"),
   openSidebar: $("#openSidebar"),
+  pendingImages: $("#pendingImages"),
   selectedModel: $("#selectedModel"),
   selectedKnowledgeCount: $("#selectedKnowledgeCount"),
   sendButton: $("#sendButton"),
@@ -72,7 +77,8 @@ const elements = {
   themeIcon: $("#themeIcon"),
   themeLabel: $("#themeLabel"),
   uploadButton: $("#uploadButton"),
-  uploadLabel: $("#uploadLabel")
+  uploadLabel: $("#uploadLabel"),
+  webChip: $("#webChip")
 };
 
 const state = {
@@ -94,6 +100,10 @@ const state = {
   memories: [],
   memoryEnabled: true,
   memoriesAvailable: true,
+  webAvailable: false,
+  pendingImages: [],
+  chatSearch: "",
+  showArchived: false,
   editingMemoryId: null,
   syncStatus: "로컬 저장",
   syncTimer: null
@@ -134,9 +144,17 @@ function normalizeChat(chat) {
     title: chat.title || "새 대화",
     model: chat.model || state.selectedModel || state.defaultModel,
     useMemory: chat.useMemory !== false,
+    useWeb: chat.useWeb === true,
+    archived: chat.archived === true,
     createdAt: chat.createdAt || Date.now(),
     updatedAt: chat.updatedAt || chat.createdAt || Date.now(),
-    messages: Array.isArray(chat.messages) ? chat.messages : []
+    messages: Array.isArray(chat.messages)
+      ? chat.messages.map((message) => ({
+          ...message,
+          sources: Array.isArray(message.sources) ? message.sources : [],
+          attachments: Array.isArray(message.attachments) ? message.attachments : []
+        }))
+      : []
   };
 }
 
@@ -193,6 +211,8 @@ function renderMessage(message, streaming = false) {
   const fragment = elements.messageTemplate.content.cloneNode(true);
   const article = fragment.querySelector(".message");
   const body = fragment.querySelector(".message-body");
+  const attachments = fragment.querySelector(".message-attachments");
+  const sources = fragment.querySelector(".source-list");
   const copy = fragment.querySelector(".copy-button");
   const remember = fragment.querySelector(".remember-button");
   article.classList.add(message.role);
@@ -201,6 +221,27 @@ function renderMessage(message, streaming = false) {
   fragment.querySelector(".message-meta span").textContent = formatTime(message.createdAt);
   body.innerHTML = markdown(message.content);
   body.classList.toggle("typing", streaming);
+  for (const attachment of message.attachments || []) {
+    const image = document.createElement("img");
+    image.src = attachment.dataUrl;
+    image.alt = attachment.name;
+    image.title = attachment.name;
+    attachments.append(image);
+  }
+  attachments.hidden = !attachments.childElementCount;
+  for (const [index, source] of (message.sources || []).entries()) {
+    const link = document.createElement("a");
+    link.href = source.url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    const number = document.createElement("span");
+    number.textContent = index + 1;
+    const title = document.createElement("strong");
+    title.textContent = source.title;
+    link.append(number, title);
+    sources.append(link);
+  }
+  sources.hidden = !sources.childElementCount;
   copy.addEventListener("click", async () => {
     await navigator.clipboard.writeText(message.content);
     copy.textContent = "복사됨";
@@ -229,13 +270,22 @@ function renderMessages() {
 
 function renderChats() {
   elements.chatList.replaceChildren();
-  elements.chatCount.textContent = state.chats.length;
-  for (const chat of state.chats) {
+  const query = state.chatSearch.trim().toLocaleLowerCase();
+  const chats = state.chats.filter(
+    (chat) =>
+      (state.showArchived ? chat.archived : !chat.archived) &&
+      (!query ||
+        chat.title.toLocaleLowerCase().includes(query) ||
+        chat.messages.some((message) => message.content.toLocaleLowerCase().includes(query)))
+  );
+  elements.chatCount.textContent = chats.length;
+  elements.archiveToggle.textContent = state.showArchived ? "보관함" : "최근 대화";
+  for (const chat of chats) {
     const button = document.createElement("button");
     button.className = `chat-item${chat.id === state.activeChatId ? " active" : ""}`;
     button.type = "button";
     button.innerHTML =
-      '<span class="chat-title"></span><span class="delete-chat" role="button" aria-label="대화 삭제">×</span>';
+      '<span class="chat-title"></span><span class="archive-chat" role="button"></span><span class="delete-chat" role="button" aria-label="대화 삭제">×</span>';
     button.querySelector(".chat-title").textContent = chat.title;
     button.addEventListener("click", () => {
       state.activeChatId = chat.id;
@@ -243,12 +293,67 @@ function renderChats() {
       render();
       closeSidebar();
     });
+    const archive = button.querySelector(".archive-chat");
+    archive.textContent = chat.archived ? "↩" : "⌑";
+    archive.setAttribute("aria-label", chat.archived ? "대화 복원" : "대화 보관");
+    archive.addEventListener("click", (event) => {
+      event.stopPropagation();
+      chat.archived = !chat.archived;
+      chat.updatedAt = Date.now();
+      if (state.activeChatId === chat.id) {
+        state.activeChatId =
+          state.chats.find(
+            (candidate) =>
+              candidate.id !== chat.id && candidate.archived === state.showArchived
+          )?.id || null;
+      }
+      save();
+      render();
+      scheduleSync();
+    });
     button.querySelector(".delete-chat").addEventListener("click", (event) => {
       event.stopPropagation();
       deleteChat(chat.id);
     });
     elements.chatList.append(button);
   }
+}
+
+function renderPendingImages() {
+  elements.pendingImages.replaceChildren();
+  for (const [index, attachment] of state.pendingImages.entries()) {
+    const item = document.createElement("span");
+    const image = document.createElement("img");
+    image.src = attachment.dataUrl;
+    image.alt = "";
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.textContent = "×";
+    remove.setAttribute("aria-label", `${attachment.name} 제거`);
+    remove.addEventListener("click", () => {
+      state.pendingImages.splice(index, 1);
+      renderPendingImages();
+      renderWeb();
+    });
+    item.append(image, remove);
+    elements.pendingImages.append(item);
+  }
+  elements.pendingImages.hidden = !state.pendingImages.length;
+}
+
+function renderWeb() {
+  const enabled = state.webAvailable && activeChat()?.useWeb === true;
+  elements.webChip.hidden = !state.webAvailable;
+  elements.webChip.classList.toggle("active", enabled);
+  elements.webChip.setAttribute("aria-pressed", String(enabled));
+  const memoryActive =
+    state.memoriesAvailable &&
+    (activeChat()?.useMemory ?? state.memoryEnabled) &&
+    state.memories.length > 0;
+  const knowledgeActive =
+    state.knowledgeEnabled && state.selectedDocumentIds.length > 0;
+  elements.composerHint.hidden =
+    enabled || memoryActive || knowledgeActive || state.pendingImages.length > 0;
 }
 
 function renderAccount() {
@@ -287,6 +392,7 @@ function updateAccess() {
   const blocked = state.authRequired && !state.user;
   elements.input.disabled = state.generating || blocked;
   elements.sendButton.disabled = state.generating || blocked;
+  elements.exportChat.disabled = !activeChat();
   elements.input.placeholder = blocked
     ? "로그인 후 메시지를 보낼 수 있어요"
     : "메시지를 입력하세요";
@@ -298,6 +404,8 @@ function render() {
   renderAccount();
   renderDocuments();
   renderMemories();
+  renderPendingImages();
+  renderWeb();
   updateAccess();
 }
 
@@ -615,6 +723,8 @@ function newChat() {
     title: "새 대화",
     model: state.selectedModel || state.defaultModel,
     useMemory: state.memoryEnabled,
+    useWeb: false,
+    archived: false,
     createdAt: now,
     updatedAt: now,
     messages: []
@@ -806,7 +916,7 @@ async function restoreSession() {
   }
 }
 
-async function readStream(response, onDelta) {
+async function readStream(response, onDelta, onSources) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -820,7 +930,9 @@ async function readStream(response, onDelta) {
       const data = line.trim().slice(5).trim();
       if (!data || data === "[DONE]") continue;
       try {
-        const delta = JSON.parse(data).choices?.[0]?.delta?.content;
+        const event = JSON.parse(data);
+        if (Array.isArray(event.openui?.sources)) onSources(event.openui.sources);
+        const delta = event.choices?.[0]?.delta?.content;
         if (delta) onDelta(delta);
       } catch {
         // Ignore provider-specific events.
@@ -835,17 +947,34 @@ async function sendMessage(content) {
     openAuth();
     return;
   }
-  if (!content.trim() || state.generating) return;
+  if ((!content.trim() && !state.pendingImages.length) || state.generating) return;
   const chat = activeChat() || newChat();
-  const user = { id: makeId(), role: "user", content: content.trim(), createdAt: Date.now() };
-  const assistant = { id: makeId(), role: "assistant", content: "", createdAt: Date.now() };
+  const user = {
+    id: makeId(),
+    role: "user",
+    content: content.trim(),
+    sources: [],
+    attachments: [...state.pendingImages],
+    createdAt: Date.now()
+  };
+  const assistant = {
+    id: makeId(),
+    role: "assistant",
+    content: "",
+    sources: [],
+    attachments: [],
+    createdAt: Date.now()
+  };
   const requestMessages = [...chat.messages, user];
   chat.messages.push(user, assistant);
   chat.model = state.selectedModel || state.defaultModel;
   chat.updatedAt = Date.now();
   if (chat.messages.length === 2) {
-    chat.title = content.trim().replace(/\s+/g, " ").slice(0, 34);
+    chat.title = (content.trim() || state.pendingImages[0]?.name || "이미지 대화")
+      .replace(/\s+/g, " ")
+      .slice(0, 34);
   }
+  state.pendingImages = [];
   save();
   setGenerating(true);
   render();
@@ -857,22 +986,36 @@ async function sendMessage(content) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         model: state.selectedModel || state.defaultModel,
-        messages: requestMessages.map(({ role, content: text }) => ({ role, content: text })),
+        messages: requestMessages.map(({ role, content: text, attachments }) => ({
+          role,
+          content: text,
+          attachments
+        })),
         temperature: 0.7,
         useKnowledge: state.knowledgeEnabled && state.selectedDocumentIds.length > 0,
         documentIds: state.selectedDocumentIds,
-        useMemory: state.memoriesAvailable && chat.useMemory !== false
+        useMemory: state.memoriesAvailable && chat.useMemory !== false,
+        useWeb: state.webAvailable && chat.useWeb === true
       }),
       signal: state.controller.signal
     });
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
-      throw new Error(payload.error?.message || `요청 실패 (${response.status})`);
+      throw new Error(
+        payload.error?.message || payload.detail || `요청 실패 (${response.status})`
+      );
     }
-    await readStream(response, (delta) => {
-      assistant.content += delta;
-      renderMessages();
-    });
+    await readStream(
+      response,
+      (delta) => {
+        assistant.content += delta;
+        renderMessages();
+      },
+      (sources) => {
+        assistant.sources = sources;
+        renderMessages();
+      }
+    );
     if (!assistant.content) assistant.content = "응답이 비어 있습니다.";
   } catch (error) {
     assistant.content =
@@ -919,8 +1062,10 @@ async function loadModels() {
     state.authRequired = config.authRequired !== false;
     state.registrationAllowed = config.registrationAllowed !== false;
     state.memoriesAvailable = config.memoriesEnabled !== false;
+    state.webAvailable = config.webSearchEnabled === true;
     renderMessages();
     renderMemories();
+    renderWeb();
     elements.connectionDetail.textContent = new URL(config.apiBaseUrl).host;
     if (state.authRequired && !state.user) {
       state.selectedModel ||= state.defaultModel;
@@ -972,12 +1117,77 @@ function closeSidebar() {
   elements.backdrop.classList.remove("open");
 }
 
+function exportActiveChat() {
+  const chat = activeChat();
+  if (!chat) return;
+  if (state.user) {
+    window.location.assign(
+      `/api/chats/${encodeURIComponent(chat.id)}/export?format=markdown`
+    );
+    return;
+  }
+  const blob = new Blob([JSON.stringify(normalizeChat(chat), null, 2)], {
+    type: "application/json"
+  });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = `chat-${chat.id}.json`;
+  link.click();
+  URL.revokeObjectURL(link.href);
+}
+
 elements.composer.addEventListener("submit", (event) => {
   event.preventDefault();
   const content = elements.input.value;
   elements.input.value = "";
   elements.input.style.height = "auto";
   sendMessage(content);
+});
+elements.chatSearch.addEventListener("input", () => {
+  state.chatSearch = elements.chatSearch.value;
+  renderChats();
+});
+elements.archiveToggle.addEventListener("click", () => {
+  state.showArchived = !state.showArchived;
+  state.activeChatId =
+    state.chats.find((chat) => chat.archived === state.showArchived)?.id || null;
+  save();
+  render();
+});
+elements.exportChat.addEventListener("click", exportActiveChat);
+elements.imageUpload.addEventListener("change", () => {
+  const files = [...(elements.imageUpload.files || [])].slice(
+    0,
+    3 - state.pendingImages.length
+  );
+  elements.imageUpload.value = "";
+  for (const file of files) {
+    if (!["image/png", "image/jpeg", "image/webp", "image/gif"].includes(file.type)) {
+      continue;
+    }
+    if (file.size > 2 * 1024 * 1024) continue;
+    const reader = new FileReader();
+    reader.addEventListener("load", () => {
+      state.pendingImages.push({
+        name: file.name,
+        contentType: file.type,
+        dataUrl: reader.result
+      });
+      state.pendingImages = state.pendingImages.slice(0, 3);
+      renderPendingImages();
+      renderWeb();
+    });
+    reader.readAsDataURL(file);
+  }
+});
+elements.webChip.addEventListener("click", () => {
+  const chat = activeChat() || newChat();
+  if (!chat) return;
+  chat.useWeb = !chat.useWeb;
+  chat.updatedAt = Date.now();
+  save();
+  renderWeb();
+  scheduleSync();
 });
 elements.input.addEventListener("input", () => {
   elements.input.style.height = "auto";

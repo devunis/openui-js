@@ -92,6 +92,32 @@ button {
   align-items: center;
 }
 
+.history-heading button {
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+}
+
+.chat-search {
+  width: calc(100% - 8px);
+  margin: 0 4px 8px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  outline: 0;
+  background: color-mix(in srgb, var(--panel) 65%, transparent);
+  color: var(--ink);
+  font: inherit;
+  font-size: 11px;
+}
+
+.chat-search:focus {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+}
+
 .brand-row {
   justify-content: space-between;
   padding: 0 7px 20px;
@@ -211,7 +237,7 @@ kbd {
   align-items: center;
   width: 100%;
   margin: 3px 0;
-  padding: 11px 34px 11px 12px;
+  padding: 11px 62px 11px 12px;
   overflow: hidden;
   border-radius: 10px;
   background: transparent;
@@ -242,7 +268,8 @@ kbd {
   text-overflow: ellipsis;
 }
 
-.delete-chat {
+.delete-chat,
+.archive-chat {
   position: absolute;
   right: 7px;
   display: grid;
@@ -255,12 +282,19 @@ kbd {
   place-items: center;
 }
 
+.archive-chat {
+  right: 34px;
+}
+
 .chat-item:hover .delete-chat,
-.delete-chat:focus-visible {
+.delete-chat:focus-visible,
+.chat-item:hover .archive-chat,
+.archive-chat:focus-visible {
   opacity: 1;
 }
 
-.delete-chat:hover {
+.delete-chat:hover,
+.archive-chat:hover {
   background: var(--soft);
   color: var(--ink);
 }
@@ -903,6 +937,62 @@ h1 em {
   color: var(--muted);
 }
 
+.message-attachments,
+.pending-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.message-attachments img {
+  width: min(240px, 100%);
+  max-height: 240px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  object-fit: cover;
+}
+
+.source-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 7px;
+  margin-top: 12px;
+}
+
+.source-list a {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: var(--ink);
+  font-size: 10px;
+  text-decoration: none;
+}
+
+.source-list a:hover {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--line));
+}
+
+.source-list span {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--soft);
+  place-items: center;
+}
+
+.source-list strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .message-actions {
   display: flex;
   gap: 3px;
@@ -953,6 +1043,61 @@ h1 em {
   background: var(--panel);
   box-shadow: 0 10px 36px rgba(35, 38, 34, 0.11);
   transition: 160ms ease;
+}
+
+.pending-images {
+  margin: 0 0 9px;
+}
+
+.pending-images > span {
+  position: relative;
+}
+
+.pending-images img {
+  display: block;
+  width: 54px;
+  height: 54px;
+  border-radius: 9px;
+  object-fit: cover;
+}
+
+.pending-images button {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  display: grid;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--ink);
+  color: var(--panel);
+  font-size: 12px;
+  place-items: center;
+}
+
+.attachment-button,
+.web-chip {
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 84%, transparent);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.attachment-button {
+  cursor: pointer;
+}
+
+.attachment-button input {
+  display: none;
+}
+
+.web-chip.active {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--line));
+  background: color-mix(in srgb, var(--accent) 9%, var(--panel));
+  color: var(--accent);
 }
 
 .composer:focus-within {

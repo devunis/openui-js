@@ -33,13 +33,15 @@ function makeId() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function createChat(model = "llama3.2", useMemory = true) {
+function createChat(model = "llama3.2", useMemory = true, useWeb = false) {
   const now = Date.now();
   return {
     id: makeId(),
     title: "새 대화",
     model,
     useMemory,
+    useWeb,
+    archived: false,
     createdAt: now,
     updatedAt: now,
     messages: []
@@ -52,9 +54,17 @@ function normalizeChat(chat, fallbackModel = "llama3.2") {
     title: chat.title || "새 대화",
     model: chat.model || fallbackModel,
     useMemory: chat.useMemory !== false,
+    useWeb: chat.useWeb === true,
+    archived: chat.archived === true,
     createdAt: chat.createdAt || Date.now(),
     updatedAt: chat.updatedAt || chat.createdAt || Date.now(),
-    messages: Array.isArray(chat.messages) ? chat.messages : []
+    messages: Array.isArray(chat.messages)
+      ? chat.messages.map((message) => ({
+          ...message,
+          sources: Array.isArray(message.sources) ? message.sources : [],
+          attachments: Array.isArray(message.attachments) ? message.attachments : []
+        }))
+      : []
   };
 }
 
@@ -79,7 +89,7 @@ function formatTime(timestamp) {
   }).format(new Date(timestamp));
 }
 
-async function readEventStream(response, onDelta) {
+async function readEventStream(response, onDelta, onSources) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -97,6 +107,7 @@ async function readEventStream(response, onDelta) {
       if (!data || data === "[DONE]") continue;
       try {
         const event = JSON.parse(data);
+        if (Array.isArray(event.openui?.sources)) onSources(event.openui.sources);
         const content = event.choices?.[0]?.delta?.content;
         if (content) onDelta(content);
       } catch {
@@ -136,6 +147,28 @@ function Message({ message, streaming, onRemember }) {
         <div className={`message-body${streaming ? " typing" : ""}`}>
           <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
         </div>
+        {message.attachments?.length ? (
+          <div className="message-attachments">
+            {message.attachments.map((attachment) => (
+              <img
+                src={attachment.dataUrl}
+                alt={attachment.name}
+                title={attachment.name}
+                key={`${attachment.name}-${attachment.dataUrl.slice(-16)}`}
+              />
+            ))}
+          </div>
+        ) : null}
+        {message.sources?.length ? (
+          <div className="source-list" aria-label="웹 출처">
+            {message.sources.map((source, index) => (
+              <a href={source.url} target="_blank" rel="noreferrer" key={source.url}>
+                <span>{index + 1}</span>
+                <strong>{source.title}</strong>
+              </a>
+            ))}
+          </div>
+        ) : null}
         <div className="message-actions">
           <button className="copy-button" type="button" onClick={copy}>
             {copied ? "복사됨" : "복사"}
@@ -439,7 +472,9 @@ function MemoryDrawer({
 
 export default function App() {
   const saved = useMemo(loadSavedState, []);
-  const [chats, setChats] = useState(saved.chats);
+  const [chats, setChats] = useState(() =>
+    saved.chats.map((chat) => normalizeChat(chat, saved.selectedModel))
+  );
   const [activeChatId, setActiveChatId] = useState(
     saved.activeChatId || saved.chats[0]?.id || null
   );
@@ -449,6 +484,9 @@ export default function App() {
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [input, setInput] = useState("");
+  const [pendingImages, setPendingImages] = useState([]);
+  const [chatSearch, setChatSearch] = useState("");
+  const [showArchived, setShowArchived] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [user, setUser] = useState(undefined);
   const [authOpen, setAuthOpen] = useState(false);
@@ -467,6 +505,7 @@ export default function App() {
   const [memoryOpen, setMemoryOpen] = useState(false);
   const [memoryEnabled, setMemoryEnabled] = useState(true);
   const [memoriesAvailable, setMemoriesAvailable] = useState(true);
+  const [webAvailable, setWebAvailable] = useState(false);
   const [memoryDraft, setMemoryDraft] = useState("");
   const [memoryType, setMemoryType] = useState("user");
   const [editingMemoryId, setEditingMemoryId] = useState(null);
@@ -494,6 +533,19 @@ export default function App() {
     [chats, activeChatId]
   );
   const memoryUseEnabled = activeChat?.useMemory ?? memoryEnabled;
+  const webUseEnabled = webAvailable && activeChat?.useWeb === true;
+  const visibleChats = useMemo(() => {
+    const query = chatSearch.trim().toLocaleLowerCase();
+    return chats.filter(
+      (chat) =>
+        (showArchived ? chat.archived : !chat.archived) &&
+        (!query ||
+          chat.title.toLocaleLowerCase().includes(query) ||
+          chat.messages.some((message) =>
+            message.content.toLocaleLowerCase().includes(query)
+          ))
+    );
+  }, [chats, chatSearch, showArchived]);
 
   useEffect(() => {
     localStorage.setItem(
@@ -638,6 +690,7 @@ export default function App() {
         setAuthRequired(config.authRequired !== false);
         setRegistrationAllowed(config.registrationAllowed !== false);
         setMemoriesAvailable(config.memoriesEnabled !== false);
+        setWebAvailable(config.webSearchEnabled === true);
         const host = new URL(config.apiBaseUrl).host;
         if (config.authRequired !== false && !user) {
           setSelectedModel((current) => current || config.defaultModel);
@@ -709,7 +762,7 @@ export default function App() {
       setAuthOpen(true);
       return null;
     }
-    const chat = createChat(selectedModel || defaultModel, memoryEnabled);
+    const chat = createChat(selectedModel || defaultModel, memoryEnabled, false);
     setChats((current) => [chat, ...current]);
     setActiveChatId(chat.id);
     setSidebarOpen(false);
@@ -726,6 +779,51 @@ export default function App() {
       fetch(`/api/chats/${encodeURIComponent(chatId)}`, { method: "DELETE" }).catch(
         () => setSyncStatus("동기화 오류")
       );
+    }
+  }
+
+  function archiveChat(chatId) {
+    updateChat(chatId, (chat) => ({ ...chat, archived: !chat.archived }));
+    if (activeChatId === chatId) {
+      const replacement = chats.find(
+        (chat) => chat.id !== chatId && chat.archived === showArchived
+      );
+      setActiveChatId(replacement?.id || null);
+    }
+  }
+
+  function exportActiveChat(format = "markdown") {
+    if (!activeChat) return;
+    if (user) {
+      window.location.assign(
+        `/api/chats/${encodeURIComponent(activeChat.id)}/export?format=${format}`
+      );
+      return;
+    }
+    const json = JSON.stringify(normalizeChat(activeChat, defaultModel), null, 2);
+    const blob = new Blob([json], { type: "application/json" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = `chat-${activeChat.id}.json`;
+    link.click();
+    URL.revokeObjectURL(link.href);
+  }
+
+  function addImages(event) {
+    const files = [...(event.target.files || [])];
+    event.target.value = "";
+    for (const file of files.slice(0, 3 - pendingImages.length)) {
+      if (!["image/png", "image/jpeg", "image/webp", "image/gif"].includes(file.type)) {
+        continue;
+      }
+      if (file.size > 2 * 1024 * 1024) continue;
+      const reader = new FileReader();
+      reader.onload = () =>
+        setPendingImages((current) => [
+          ...current,
+          { name: file.name, contentType: file.type, dataUrl: reader.result }
+        ].slice(0, 3));
+      reader.readAsDataURL(file);
     }
   }
 
@@ -916,11 +1014,11 @@ export default function App() {
       return;
     }
     const content = input.trim();
-    if (!content || generating) return;
+    if ((!content && !pendingImages.length) || generating) return;
 
     let chat = activeChat;
     if (!chat) {
-      chat = createChat(selectedModel || defaultModel, memoryEnabled);
+      chat = createChat(selectedModel || defaultModel, memoryEnabled, false);
       setChats((current) => [chat, ...current]);
       setActiveChatId(chat.id);
     }
@@ -929,19 +1027,25 @@ export default function App() {
       id: makeId(),
       role: "user",
       content,
+      sources: [],
+      attachments: pendingImages,
       createdAt: Date.now()
     };
     const assistantMessage = {
       id: makeId(),
       role: "assistant",
       content: "",
+      sources: [],
+      attachments: [],
       createdAt: Date.now()
     };
     const requestMessages = [...chat.messages, userMessage];
     const nextMessages = [...requestMessages, assistantMessage];
     const title =
       chat.messages.length === 0
-        ? content.replace(/\s+/g, " ").slice(0, 34)
+        ? (content || pendingImages[0]?.name || "이미지 대화")
+            .replace(/\s+/g, " ")
+            .slice(0, 34)
         : chat.title;
 
     updateChat(chat.id, (current) => ({
@@ -951,6 +1055,7 @@ export default function App() {
       messages: nextMessages
     }));
     setInput("");
+    setPendingImages([]);
     setGenerating(true);
     abortRef.current = new AbortController();
 
@@ -960,14 +1065,16 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model: selectedModel || defaultModel,
-          messages: requestMessages.map(({ role, content: text }) => ({
+          messages: requestMessages.map(({ role, content: text, attachments }) => ({
             role,
-            content: text
+            content: text,
+            attachments
           })),
           temperature: 0.7,
           useKnowledge: knowledgeEnabled && selectedDocumentIds.length > 0,
           documentIds: selectedDocumentIds,
-          useMemory: memoriesAvailable && memoryUseEnabled
+          useMemory: memoriesAvailable && memoryUseEnabled,
+          useWeb: webUseEnabled
         }),
         signal: abortRef.current.signal
       });
@@ -976,7 +1083,7 @@ export default function App() {
         let message = `요청 실패 (${response.status})`;
         try {
           const payload = await response.json();
-          message = payload.error?.message || message;
+          message = payload.error?.message || payload.detail || message;
         } catch {
           // Keep status fallback.
         }
@@ -984,17 +1091,30 @@ export default function App() {
       }
 
       let fullContent = "";
-      await readEventStream(response, (delta) => {
-        fullContent += delta;
-        updateChat(chat.id, (current) => ({
-          ...current,
-          messages: current.messages.map((message) =>
-            message.id === assistantMessage.id
-              ? { ...message, content: fullContent }
-              : message
-          )
-        }));
-      });
+      await readEventStream(
+        response,
+        (delta) => {
+          fullContent += delta;
+          updateChat(chat.id, (current) => ({
+            ...current,
+            messages: current.messages.map((message) =>
+              message.id === assistantMessage.id
+                ? { ...message, content: fullContent }
+                : message
+            )
+          }));
+        },
+        (sources) => {
+          updateChat(chat.id, (current) => ({
+            ...current,
+            messages: current.messages.map((message) =>
+              message.id === assistantMessage.id
+                ? { ...message, sources }
+                : message
+            )
+          }));
+        }
+      );
 
       if (!fullContent) {
         updateChat(chat.id, (current) => ({
@@ -1053,11 +1173,21 @@ export default function App() {
         </button>
 
         <div className="history-heading">
-          <span>최근 대화</span>
-          <span>{chats.length}</span>
+          <button type="button" onClick={() => setShowArchived((value) => !value)}>
+            {showArchived ? "보관함" : "최근 대화"}
+          </button>
+          <span>{visibleChats.length}</span>
         </div>
+        <input
+          className="chat-search"
+          type="search"
+          value={chatSearch}
+          placeholder="대화 검색"
+          aria-label="대화 검색"
+          onChange={(event) => setChatSearch(event.target.value)}
+        />
         <nav className="chat-list" aria-label="최근 대화">
-          {chats.map((chat) => (
+          {visibleChats.map((chat) => (
             <button
               className={`chat-item${chat.id === activeChatId ? " active" : ""}`}
               type="button"
@@ -1068,6 +1198,25 @@ export default function App() {
               }}
             >
               <span className="chat-title">{chat.title}</span>
+              <span
+                className="archive-chat"
+                role="button"
+                tabIndex="0"
+                aria-label={chat.archived ? "대화 복원" : "대화 보관"}
+                title={chat.archived ? "복원" : "보관"}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  archiveChat(chat.id);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.stopPropagation();
+                    archiveChat(chat.id);
+                  }
+                }}
+              >
+                {chat.archived ? "↩" : "⌑"}
+              </span>
               <span
                 className="delete-chat"
                 role="button"
@@ -1222,6 +1371,16 @@ export default function App() {
             <button
               className="icon-button"
               type="button"
+              aria-label="대화 내보내기"
+              title="대화 내보내기"
+              disabled={!activeChat}
+              onClick={() => exportActiveChat("markdown")}
+            >
+              ⇩
+            </button>
+            <button
+              className="icon-button"
+              type="button"
               aria-label="현재 대화 비우기"
               title="대화 비우기"
               onClick={clearChat}
@@ -1302,6 +1461,26 @@ export default function App() {
 
         <footer className="composer-wrap">
           <form className="composer" onSubmit={submitMessage}>
+            {pendingImages.length ? (
+              <div className="pending-images">
+                {pendingImages.map((attachment, index) => (
+                  <span key={`${attachment.name}-${index}`}>
+                    <img src={attachment.dataUrl} alt="" />
+                    <button
+                      type="button"
+                      aria-label={`${attachment.name} 제거`}
+                      onClick={() =>
+                        setPendingImages((current) =>
+                          current.filter((_, itemIndex) => itemIndex !== index)
+                        )
+                      }
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            ) : null}
             <textarea
               ref={textareaRef}
               rows="1"
@@ -1328,6 +1507,33 @@ export default function App() {
             />
             <div className="composer-bottom">
               <div className="context-chips">
+                <label className="attachment-button" title="이미지 첨부">
+                  <input
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp,image/gif"
+                    multiple
+                    onChange={addImages}
+                  />
+                  ＋ 이미지
+                </label>
+                {webAvailable ? (
+                  <button
+                    className={`web-chip${webUseEnabled ? " active" : ""}`}
+                    type="button"
+                    aria-pressed={webUseEnabled}
+                    onClick={() => {
+                      const chat = activeChat || startNewChat();
+                      if (chat) {
+                        updateChat(chat.id, (current) => ({
+                          ...current,
+                          useWeb: !current.useWeb
+                        }));
+                      }
+                    }}
+                  >
+                    ◎ 웹 검색
+                  </button>
+                ) : null}
                 {memoriesAvailable && memoryUseEnabled && memories.length ? (
                   <button
                     className="memory-chip"
@@ -1349,7 +1555,9 @@ export default function App() {
               </div>
               {!(
                 (memoriesAvailable && memoryUseEnabled && memories.length) ||
-                (knowledgeEnabled && selectedDocumentIds.length)
+                (knowledgeEnabled && selectedDocumentIds.length) ||
+                webUseEnabled ||
+                pendingImages.length
               ) ? (
                 <span className="composer-hint">
                   <kbd>Enter</kbd> 전송 · <kbd>Shift Enter</kbd> 줄바꿈
@@ -1359,7 +1567,11 @@ export default function App() {
                 className="send-button"
                 type="submit"
                 aria-label="메시지 보내기"
-                disabled={generating || !input.trim() || (authRequired && !user)}
+                disabled={
+                  generating ||
+                  (!input.trim() && !pendingImages.length) ||
+                  (authRequired && !user)
+                }
               >
                 ↑
               </button>

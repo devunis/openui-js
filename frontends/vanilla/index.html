@@ -26,8 +26,9 @@
           <span aria-hidden="true">＋</span>새 대화<kbd>⌘ K</kbd>
         </button>
         <div class="history-heading">
-          <span>최근 대화</span><span id="chatCount">0</span>
+          <button id="archiveToggle" type="button">최근 대화</button><span id="chatCount">0</span>
         </div>
+        <input class="chat-search" id="chatSearch" type="search" placeholder="대화 검색" aria-label="대화 검색" />
         <nav class="chat-list" id="chatList" aria-label="최근 대화"></nav>
         <div class="sidebar-footer">
           <div id="accountArea"></div>
@@ -67,6 +68,9 @@
             </button>
             <button class="knowledge-button" id="knowledgeButton" type="button">
               <span aria-hidden="true">⌁</span> 지식 <b id="knowledgeCount">0</b>
+            </button>
+            <button class="icon-button" id="exportChat" type="button" aria-label="대화 내보내기" title="대화 내보내기">
+              ⇩
             </button>
             <button class="icon-button" id="clearChat" type="button" aria-label="현재 대화 비우기">
               ⌫
@@ -109,6 +113,7 @@
 
         <footer class="composer-wrap">
           <form class="composer" id="composer">
+            <div class="pending-images" id="pendingImages" hidden></div>
             <textarea
               id="messageInput"
               rows="1"
@@ -118,6 +123,11 @@
             ></textarea>
             <div class="composer-bottom">
               <div class="context-chips">
+                <label class="attachment-button" title="이미지 첨부">
+                  <input id="imageUpload" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple />
+                  ＋ 이미지
+                </label>
+                <button class="web-chip" id="webChip" type="button" hidden>◎ 웹 검색</button>
                 <button class="memory-chip" id="memoryChip" type="button" hidden>
                   ✦ 메모리 <span id="composerMemoryCount">0</span>
                 </button>
@@ -253,6 +263,8 @@
         <div class="message-content">
           <div class="message-meta"><strong></strong><span></span></div>
           <div class="message-body"></div>
+          <div class="message-attachments" hidden></div>
+          <div class="source-list" hidden></div>
           <div class="message-actions">
             <button class="copy-button" type="button">복사</button>
             <button class="copy-button remember-button" type="button">기억하기</button>
