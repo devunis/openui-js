@@ -62,6 +62,9 @@
             <div class="model-menu" id="modelMenu" role="listbox"></div>
           </div>
           <div class="topbar-actions">
+            <button class="knowledge-button" id="knowledgeButton" type="button">
+              <span aria-hidden="true">⌁</span> 지식 <b id="knowledgeCount">0</b>
+            </button>
             <button class="icon-button" id="clearChat" type="button" aria-label="현재 대화 비우기">
               ⌫
             </button>
@@ -111,7 +114,10 @@
               aria-label="메시지"
             ></textarea>
             <div class="composer-bottom">
-              <span class="composer-hint"><kbd>Enter</kbd> 전송 · <kbd>Shift Enter</kbd> 줄바꿈</span>
+              <button class="knowledge-chip" id="knowledgeChip" type="button" hidden>
+                ⌁ 문서 <span id="selectedKnowledgeCount">0</span>개 검색
+              </button>
+              <span class="composer-hint" id="composerHint"><kbd>Enter</kbd> 전송 · <kbd>Shift Enter</kbd> 줄바꿈</span>
               <button class="send-button" id="sendButton" type="submit" aria-label="메시지 보내기">
                 ↑
               </button>
@@ -121,6 +127,31 @@
         </footer>
       </main>
     </div>
+
+    <div class="drawer-backdrop" id="knowledgeBackdrop" hidden></div>
+    <aside class="knowledge-drawer" id="knowledgeDrawer" aria-label="지식 문서" hidden>
+      <div class="drawer-header">
+        <div>
+          <p class="eyebrow">LOCAL KNOWLEDGE</p>
+          <h2>내 문서</h2>
+        </div>
+        <button class="icon-button" id="knowledgeClose" type="button" aria-label="닫기">×</button>
+      </div>
+      <p class="drawer-copy">
+        TXT, Markdown, PDF를 추가하면 질문과 관련된 부분만 찾아 답변에 참고합니다.
+      </p>
+      <label class="knowledge-toggle">
+        <span><strong>문서 검색 사용</strong><small id="knowledgeSelectionLabel">0개 문서 선택됨</small></span>
+        <input id="knowledgeEnabled" type="checkbox" checked />
+      </label>
+      <label class="upload-button" id="uploadButton">
+        <input id="documentUpload" type="file" accept=".txt,.md,.markdown,.pdf" />
+        <span id="uploadLabel">＋ 문서 업로드</span>
+      </label>
+      <p class="upload-hint">파일당 최대 10MB · 원본 파일은 저장하지 않음</p>
+      <p class="knowledge-error" id="knowledgeError" hidden></p>
+      <div class="document-list" id="documentList"></div>
+    </aside>
 
     <div class="modal-backdrop" id="authModal" hidden>
       <section

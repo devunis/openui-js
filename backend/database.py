@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import time
 import uuid
@@ -80,6 +81,34 @@ def init_db() -> None:
 
             CREATE INDEX IF NOT EXISTS messages_chat_position_idx
             ON messages(chat_id, position);
+
+            CREATE TABLE IF NOT EXISTS documents (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                content_type TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                chunk_count INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS documents_user_created_idx
+            ON documents(user_id, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS document_chunks (
+                id TEXT PRIMARY KEY,
+                document_id TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                content TEXT NOT NULL,
+                FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS document_chunks_document_position_idx
+            ON document_chunks(document_id, position);
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS document_chunks_fts
+            USING fts5(chunk_id UNINDEXED, content, tokenize='unicode61');
             """
         )
 
@@ -240,3 +269,162 @@ def delete_chat(user_id: str, chat_id: str) -> bool:
             (chat_id, user_id),
         )
     return cursor.rowcount > 0
+
+
+def create_document(
+    user_id: str,
+    filename: str,
+    content_type: str,
+    size_bytes: int,
+    chunks: list[str],
+) -> dict[str, Any]:
+    document_id = str(uuid.uuid4())
+    created_at = int(time.time() * 1000)
+    chunk_rows = [
+        (str(uuid.uuid4()), document_id, position, content)
+        for position, content in enumerate(chunks)
+    ]
+    with connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO documents (
+                id, user_id, filename, content_type, size_bytes, chunk_count, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                document_id,
+                user_id,
+                filename,
+                content_type,
+                size_bytes,
+                len(chunk_rows),
+                created_at,
+            ),
+        )
+        connection.executemany(
+            """
+            INSERT INTO document_chunks (id, document_id, position, content)
+            VALUES (?, ?, ?, ?)
+            """,
+            chunk_rows,
+        )
+        connection.executemany(
+            "INSERT INTO document_chunks_fts (chunk_id, content) VALUES (?, ?)",
+            [(row[0], row[3]) for row in chunk_rows],
+        )
+    return {
+        "id": document_id,
+        "filename": filename,
+        "contentType": content_type,
+        "sizeBytes": size_bytes,
+        "chunkCount": len(chunk_rows),
+        "createdAt": created_at,
+    }
+
+
+def list_documents(user_id: str) -> list[dict[str, Any]]:
+    with connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, filename, content_type, size_bytes, chunk_count, created_at
+            FROM documents
+            WHERE user_id = ?
+            ORDER BY created_at DESC
+            """,
+            (user_id,),
+        ).fetchall()
+    return [
+        {
+            "id": row["id"],
+            "filename": row["filename"],
+            "contentType": row["content_type"],
+            "sizeBytes": row["size_bytes"],
+            "chunkCount": row["chunk_count"],
+            "createdAt": row["created_at"],
+        }
+        for row in rows
+    ]
+
+
+def delete_document(user_id: str, document_id: str) -> bool:
+    with connect() as connection:
+        chunk_rows = connection.execute(
+            """
+            SELECT document_chunks.id
+            FROM document_chunks
+            JOIN documents ON documents.id = document_chunks.document_id
+            WHERE documents.id = ? AND documents.user_id = ?
+            """,
+            (document_id, user_id),
+        ).fetchall()
+        if not chunk_rows:
+            exists = connection.execute(
+                "SELECT 1 FROM documents WHERE id = ? AND user_id = ?",
+                (document_id, user_id),
+            ).fetchone()
+            if not exists:
+                return False
+        connection.executemany(
+            "DELETE FROM document_chunks_fts WHERE chunk_id = ?",
+            [(row["id"],) for row in chunk_rows],
+        )
+        connection.execute(
+            "DELETE FROM documents WHERE id = ? AND user_id = ?",
+            (document_id, user_id),
+        )
+    return True
+
+
+def search_document_chunks(
+    user_id: str,
+    query: str,
+    document_ids: list[str] | None = None,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    tokens = re.findall(r"[^\W_]{2,}", query.lower(), flags=re.UNICODE)[:16]
+    if not tokens:
+        return []
+
+    match_query = " OR ".join(f'"{token}"' for token in tokens)
+    params: list[Any] = [match_query, user_id]
+    document_filter = ""
+    if document_ids:
+        placeholders = ",".join("?" for _ in document_ids)
+        document_filter = f" AND documents.id IN ({placeholders})"
+        params.extend(document_ids)
+    params.append(max(1, min(limit, 10)))
+
+    with connect() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT
+                document_chunks.id AS chunk_id,
+                document_chunks.document_id,
+                document_chunks.position,
+                document_chunks.content,
+                documents.filename,
+                bm25(document_chunks_fts) AS rank
+            FROM document_chunks_fts
+            JOIN document_chunks
+                ON document_chunks.id = document_chunks_fts.chunk_id
+            JOIN documents
+                ON documents.id = document_chunks.document_id
+            WHERE document_chunks_fts MATCH ?
+                AND documents.user_id = ?
+                {document_filter}
+            ORDER BY rank
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+    return [
+        {
+            "chunkId": row["chunk_id"],
+            "documentId": row["document_id"],
+            "filename": row["filename"],
+            "position": row["position"],
+            "content": row["content"],
+        }
+        for row in rows
+    ]
