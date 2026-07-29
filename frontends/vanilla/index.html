@@ -52,6 +52,7 @@
           <button class="icon-button mobile-only" id="openSidebar" aria-label="사이드바 열기">
             ☰
           </button>
+          <select class="provider-select" id="providerSelect" aria-label="모델 공급자" hidden></select>
           <div id="modelPickerWrap">
             <button class="model-picker" id="modelPicker" type="button" aria-haspopup="listbox">
               <span>
@@ -128,6 +129,7 @@
                   ＋ 이미지
                 </label>
                 <button class="web-chip" id="webChip" type="button" hidden>◎ 웹 검색</button>
+                <button class="tool-chip" id="toolChip" type="button" hidden>◇ 도구 <span id="toolCount">0</span></button>
                 <button class="memory-chip" id="memoryChip" type="button" hidden>
                   ✦ 메모리 <span id="composerMemoryCount">0</span>
                 </button>

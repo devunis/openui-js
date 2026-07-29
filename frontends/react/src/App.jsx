@@ -33,14 +33,21 @@ function makeId() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function createChat(model = "llama3.2", useMemory = true, useWeb = false) {
+function createChat(
+  model = "llama3.2",
+  useMemory = true,
+  useWeb = false,
+  providerId = "default"
+) {
   const now = Date.now();
   return {
     id: makeId(),
     title: "새 대화",
     model,
+    providerId,
     useMemory,
     useWeb,
+    useTools: false,
     archived: false,
     createdAt: now,
     updatedAt: now,
@@ -53,8 +60,10 @@ function normalizeChat(chat, fallbackModel = "llama3.2") {
     ...chat,
     title: chat.title || "새 대화",
     model: chat.model || fallbackModel,
+    providerId: chat.providerId || "default",
     useMemory: chat.useMemory !== false,
     useWeb: chat.useWeb === true,
+    useTools: chat.useTools === true,
     archived: chat.archived === true,
     createdAt: chat.createdAt || Date.now(),
     updatedAt: chat.updatedAt || chat.createdAt || Date.now(),
@@ -62,7 +71,8 @@ function normalizeChat(chat, fallbackModel = "llama3.2") {
       ? chat.messages.map((message) => ({
           ...message,
           sources: Array.isArray(message.sources) ? message.sources : [],
-          attachments: Array.isArray(message.attachments) ? message.attachments : []
+          attachments: Array.isArray(message.attachments) ? message.attachments : [],
+          toolEvents: Array.isArray(message.toolEvents) ? message.toolEvents : []
         }))
       : []
   };
@@ -74,11 +84,17 @@ function loadSavedState() {
     return {
       chats: Array.isArray(saved.chats) ? saved.chats : [],
       activeChatId: saved.activeChatId || null,
-      selectedModel: saved.selectedModel || ""
+      selectedModel: saved.selectedModel || "",
+      selectedProvider: saved.selectedProvider || "default"
     };
   } catch {
     localStorage.removeItem(STORAGE_KEY);
-    return { chats: [], activeChatId: null, selectedModel: "" };
+    return {
+      chats: [],
+      activeChatId: null,
+      selectedModel: "",
+      selectedProvider: "default"
+    };
   }
 }
 
@@ -89,7 +105,7 @@ function formatTime(timestamp) {
   }).format(new Date(timestamp));
 }
 
-async function readEventStream(response, onDelta, onSources) {
+async function readEventStream(response, onDelta, onSources, onTools) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -108,6 +124,7 @@ async function readEventStream(response, onDelta, onSources) {
       try {
         const event = JSON.parse(data);
         if (Array.isArray(event.openui?.sources)) onSources(event.openui.sources);
+        if (Array.isArray(event.openui?.toolEvents)) onTools(event.openui.toolEvents);
         const content = event.choices?.[0]?.delta?.content;
         if (content) onDelta(content);
       } catch {
@@ -166,6 +183,16 @@ function Message({ message, streaming, onRemember }) {
                 <span>{index + 1}</span>
                 <strong>{source.title}</strong>
               </a>
+            ))}
+          </div>
+        ) : null}
+        {message.toolEvents?.length ? (
+          <div className="tool-event-list" aria-label="도구 실행 기록">
+            {message.toolEvents.map((event, index) => (
+              <span className={event.status} key={`${event.name}-${index}`}>
+                <b>{event.status === "success" ? "✓" : "!"}</b>
+                {event.name}
+              </span>
             ))}
           </div>
         ) : null}
@@ -479,6 +506,8 @@ export default function App() {
     saved.activeChatId || saved.chats[0]?.id || null
   );
   const [selectedModel, setSelectedModel] = useState(saved.selectedModel);
+  const [selectedProvider, setSelectedProvider] = useState(saved.selectedProvider);
+  const [providers, setProviders] = useState([]);
   const [defaultModel, setDefaultModel] = useState("llama3.2");
   const [models, setModels] = useState([]);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
@@ -506,6 +535,8 @@ export default function App() {
   const [memoryEnabled, setMemoryEnabled] = useState(true);
   const [memoriesAvailable, setMemoriesAvailable] = useState(true);
   const [webAvailable, setWebAvailable] = useState(false);
+  const [toolsAvailable, setToolsAvailable] = useState(false);
+  const [toolCount, setToolCount] = useState(0);
   const [memoryDraft, setMemoryDraft] = useState("");
   const [memoryType, setMemoryType] = useState("user");
   const [editingMemoryId, setEditingMemoryId] = useState(null);
@@ -534,6 +565,7 @@ export default function App() {
   );
   const memoryUseEnabled = activeChat?.useMemory ?? memoryEnabled;
   const webUseEnabled = webAvailable && activeChat?.useWeb === true;
+  const toolUseEnabled = toolsAvailable && activeChat?.useTools === true;
   const visibleChats = useMemo(() => {
     const query = chatSearch.trim().toLocaleLowerCase();
     return chats.filter(
@@ -553,10 +585,17 @@ export default function App() {
       JSON.stringify({
         chats: user ? [] : chats,
         activeChatId: user ? null : activeChatId,
-        selectedModel
+        selectedModel,
+        selectedProvider
       })
     );
-  }, [chats, activeChatId, selectedModel, user]);
+  }, [chats, activeChatId, selectedModel, selectedProvider, user]);
+
+  useEffect(() => {
+    if (!activeChat) return;
+    setSelectedProvider(activeChat.providerId || "default");
+    setSelectedModel(activeChat.model || defaultModel);
+  }, [activeChatId]);
 
   useEffect(() => {
     async function restoreSession() {
@@ -691,6 +730,14 @@ export default function App() {
         setRegistrationAllowed(config.registrationAllowed !== false);
         setMemoriesAvailable(config.memoriesEnabled !== false);
         setWebAvailable(config.webSearchEnabled === true);
+        setToolsAvailable(config.toolsEnabled === true);
+        setProviders(Array.isArray(config.providers) ? config.providers : []);
+        const configuredProvider =
+          (config.providers || []).find(
+            (provider) => provider.id === selectedProvider
+          ) || (config.providers || [])[0];
+        const nextProviderId = configuredProvider?.id || "default";
+        setSelectedProvider(nextProviderId);
         const host = new URL(config.apiBaseUrl).host;
         if (config.authRequired !== false && !user) {
           setSelectedModel((current) => current || config.defaultModel);
@@ -701,7 +748,9 @@ export default function App() {
           });
           return;
         }
-        const response = await fetch("/api/models");
+        const response = await fetch(
+          `/api/models?providerId=${encodeURIComponent(nextProviderId)}`
+        );
         if (!response.ok) throw new Error("모델 목록을 불러오지 못했습니다");
         const payload = await response.json();
         const nextModels = Array.isArray(payload.data)
@@ -710,8 +759,10 @@ export default function App() {
         setModels(nextModels);
         setSelectedModel((current) => {
           if (current && nextModels.includes(current)) return current;
-          if (nextModels.includes(config.defaultModel)) return config.defaultModel;
-          return nextModels[0] || config.defaultModel;
+          if (nextModels.includes(configuredProvider?.defaultModel)) {
+            return configuredProvider.defaultModel;
+          }
+          return nextModels[0] || configuredProvider?.defaultModel || config.defaultModel;
         });
         setConnection({ status: "online", title: "모델 서버 연결됨", detail: host });
       } catch (error) {
@@ -720,7 +771,18 @@ export default function App() {
       }
     }
     loadModels();
-  }, [user]);
+  }, [user, selectedProvider]);
+
+  useEffect(() => {
+    if (!toolsAvailable || (authRequired && !user)) {
+      setToolCount(0);
+      return;
+    }
+    fetch("/api/tools")
+      .then((response) => (response.ok ? response.json() : { tools: [] }))
+      .then((payload) => setToolCount(payload.tools?.length || 0))
+      .catch(() => setToolCount(0));
+  }, [toolsAvailable, authRequired, user]);
 
   useEffect(() => {
     const handleClick = (event) => {
@@ -762,7 +824,12 @@ export default function App() {
       setAuthOpen(true);
       return null;
     }
-    const chat = createChat(selectedModel || defaultModel, memoryEnabled, false);
+    const chat = createChat(
+      selectedModel || defaultModel,
+      memoryEnabled,
+      false,
+      selectedProvider
+    );
     setChats((current) => [chat, ...current]);
     setActiveChatId(chat.id);
     setSidebarOpen(false);
@@ -1018,7 +1085,12 @@ export default function App() {
 
     let chat = activeChat;
     if (!chat) {
-      chat = createChat(selectedModel || defaultModel, memoryEnabled, false);
+      chat = createChat(
+        selectedModel || defaultModel,
+        memoryEnabled,
+        false,
+        selectedProvider
+      );
       setChats((current) => [chat, ...current]);
       setActiveChatId(chat.id);
     }
@@ -1029,6 +1101,7 @@ export default function App() {
       content,
       sources: [],
       attachments: pendingImages,
+      toolEvents: [],
       createdAt: Date.now()
     };
     const assistantMessage = {
@@ -1037,6 +1110,7 @@ export default function App() {
       content: "",
       sources: [],
       attachments: [],
+      toolEvents: [],
       createdAt: Date.now()
     };
     const requestMessages = [...chat.messages, userMessage];
@@ -1052,6 +1126,7 @@ export default function App() {
       ...current,
       title,
       model: selectedModel || defaultModel,
+      providerId: selectedProvider,
       messages: nextMessages
     }));
     setInput("");
@@ -1065,6 +1140,7 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model: selectedModel || defaultModel,
+          providerId: selectedProvider,
           messages: requestMessages.map(({ role, content: text, attachments }) => ({
             role,
             content: text,
@@ -1074,7 +1150,8 @@ export default function App() {
           useKnowledge: knowledgeEnabled && selectedDocumentIds.length > 0,
           documentIds: selectedDocumentIds,
           useMemory: memoriesAvailable && memoryUseEnabled,
-          useWeb: webUseEnabled
+          useWeb: webUseEnabled,
+          useTools: toolUseEnabled
         }),
         signal: abortRef.current.signal
       });
@@ -1110,6 +1187,16 @@ export default function App() {
             messages: current.messages.map((message) =>
               message.id === assistantMessage.id
                 ? { ...message, sources }
+                : message
+            )
+          }));
+        },
+        (toolEvents) => {
+          updateChat(chat.id, (current) => ({
+            ...current,
+            messages: current.messages.map((message) =>
+              message.id === assistantMessage.id
+                ? { ...message, toolEvents }
                 : message
             )
           }));
@@ -1305,6 +1392,32 @@ export default function App() {
           >
             ☰
           </button>
+          {providers.length > 1 ? (
+            <select
+              className="provider-select"
+              aria-label="모델 공급자"
+              value={selectedProvider}
+              onChange={(event) => {
+                const providerId = event.target.value;
+                const provider = providers.find((item) => item.id === providerId);
+                setSelectedProvider(providerId);
+                setSelectedModel(provider?.defaultModel || defaultModel);
+                if (activeChat) {
+                  updateChat(activeChat.id, (chat) => ({
+                    ...chat,
+                    providerId,
+                    model: provider?.defaultModel || defaultModel
+                  }));
+                }
+              }}
+            >
+              {providers.map((provider) => (
+                <option value={provider.id} key={provider.id}>
+                  {provider.name}
+                </option>
+              ))}
+            </select>
+          ) : null}
           <div ref={modelPickerRef}>
             <button
               className="model-picker"
@@ -1534,6 +1647,25 @@ export default function App() {
                     ◎ 웹 검색
                   </button>
                 ) : null}
+                {toolsAvailable ? (
+                  <button
+                    className={`tool-chip${toolUseEnabled ? " active" : ""}`}
+                    type="button"
+                    aria-pressed={toolUseEnabled}
+                    title={`${toolCount}개 도구 사용 가능`}
+                    onClick={() => {
+                      const chat = activeChat || startNewChat();
+                      if (chat) {
+                        updateChat(chat.id, (current) => ({
+                          ...current,
+                          useTools: !current.useTools
+                        }));
+                      }
+                    }}
+                  >
+                    ◇ 도구 {toolCount}
+                  </button>
+                ) : null}
                 {memoriesAvailable && memoryUseEnabled && memories.length ? (
                   <button
                     className="memory-chip"
@@ -1557,6 +1689,7 @@ export default function App() {
                 (memoriesAvailable && memoryUseEnabled && memories.length) ||
                 (knowledgeEnabled && selectedDocumentIds.length) ||
                 webUseEnabled ||
+                toolUseEnabled ||
                 pendingImages.length
               ) ? (
                 <span className="composer-hint">

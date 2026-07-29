@@ -18,6 +18,8 @@ Svelte 없이 **React와 바닐라 JavaScript 두 가지 프런트엔드**를 �
 - 선택형 실시간 웹 검색과 답변별 클릭 가능한 출처
 - 이미지 첨부를 OpenAI 호환 멀티모달 메시지로 전달
 - 대화 본문 검색, 보관함, Markdown/JSON 내보내기
+- 여러 OpenAI 호환 공급자와 모델을 대화별로 선택
+- 안전한 계산기·현재 시각 함수 도구와 허용 목록 기반 원격 MCP 도구
 - OpenAI 호환 `/v1` API 지원
 - Ollama의 OpenAI 호환 API 지원
 - 실시간 스트리밍 응답
@@ -90,6 +92,9 @@ OpenAI 호환 규격을 제공하는 로컬 서버나 다른 서비스도 `API_B
 | `WEB_SEARCH_URL` | 빈 값 | 검색 서비스 엔드포인트 |
 | `WEB_SEARCH_API_KEY` | 빈 값 | 검색 서비스 서버 측 인증 키 |
 | `WEB_SEARCH_RESULT_COUNT` | `5` | 질문당 검색 결과 수(최대 10) |
+| `PROVIDERS_JSON` | `[]` | 추가 OpenAI 호환 공급자 배열 |
+| `ENABLE_TOOLS` | `true` | 함수 호출·MCP 도구 기능 활성화 |
+| `MCP_SERVERS_JSON` | `[]` | 원격 MCP 서버와 자동 실행 허용 도구 배열 |
 
 ## 개발
 
@@ -129,6 +134,28 @@ npm run check
 
 사이드바 검색은 대화 제목과 본문을 함께 찾습니다. 대화를 보관함으로 옮기거나, 로그인 상태에서는 Markdown으로, 로컬 상태에서는 JSON으로 내보낼 수 있습니다.
 
+## 여러 모델 공급자
+
+기본 `API_BASE_URL` 외에 여러 OpenAI 호환 엔드포인트를 추가할 수 있습니다. 키는 `/api/config`에 포함되지 않고 모델·채팅 요청 때 서버에서만 사용됩니다.
+
+```env
+PROVIDERS_JSON=[{"id":"cloud","name":"Cloud","baseUrl":"https://api.example.com/v1","apiKey":"server-secret","defaultModel":"model-x"}]
+```
+
+공급자를 둘 이상 설정하면 React와 바닐라 UI의 상단에 공급자 선택기가 나타납니다. 공급자와 모델 선택은 대화별로 저장됩니다.
+
+## 함수 호출과 MCP
+
+**도구**를 켜면 모델에 부작용 없는 내장 `calculator`, `current_time` 함수를 제공합니다. 도구 모드를 지원하지 않는 OpenAI 호환 모델에서는 이 기능을 끄세요. 도구 사용 중에는 모델의 함수 호출과 결과 확인을 위해 응답이 한 번에 표시될 수 있습니다.
+
+원격 Streamable HTTP MCP 서버도 연결할 수 있습니다. 서버가 모델에 노출하고 자동 실행해도 되는 도구만 `allowedTools`에 명시해야 합니다. 헤더 값은 서버 설정에만 남습니다.
+
+```env
+MCP_SERVERS_JSON=[{"id":"docs","name":"Docs MCP","url":"https://mcp.example.com/rpc","headers":{"Authorization":"Bearer server-secret"},"allowedTools":["search_docs"]}]
+```
+
+OpenUI JS는 MCP 세션 초기화 후 `tools/list`와 `tools/call`을 사용합니다. 도구 허용 목록은 관리자의 자동 실행 승인으로 취급되므로, 쓰기·삭제·결제처럼 부작용이 있는 도구는 넣지 않는 것을 권장합니다.
+
 ## 구조
 
 ```text
@@ -139,6 +166,8 @@ npm run check
 │   ├── rag.py          # 텍스트 추출·청킹·RAG 컨텍스트
 │   ├── memory.py       # 사용자 메모리 컨텍스트 생성
 │   ├── web_search.py   # 웹 검색·공개 URL 가져오기와 SSRF 차단
+│   ├── providers.py    # 다중 OpenAI 호환 공급자 구성
+│   ├── tools.py        # 내장 함수 도구와 원격 MCP 클라이언트
 │   ├── security.py     # 비밀번호와 세션 토큰 보안
 │   └── test_main.py    # 백엔드 API 테스트
 ├── frontends/
@@ -160,6 +189,8 @@ npm run check
 - 검색된 문서 내용은 신뢰할 수 없는 참고 데이터로 표시해 모델에 전달합니다.
 - 웹 페이지 가져오기는 HTTP(S)만 허용하고 사설·루프백·링크 로컬 주소와 리다이렉트를 검사합니다.
 - 이미지 첨부는 허용 MIME, 개수, 파일 크기를 서버에서 다시 검증합니다.
+- 추가 공급자와 MCP 인증 헤더는 공개 설정 응답이나 채팅 저장 데이터에 포함하지 않습니다.
+- 원격 MCP 도구는 서버 설정의 `allowedTools` 항목만 모델에 노출하고 실행합니다.
 - 모델·채팅 API는 기본적으로 로그인한 사용자만 호출할 수 있습니다.
 - 첫 운영 계정을 만든 뒤 `ALLOW_REGISTRATION=false`로 설정하면 추가 가입을 막을 수 있습니다.
 - 이 앱은 개인/로컬 사용을 위한 경량 구현입니다.

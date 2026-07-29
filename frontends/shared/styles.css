@@ -561,6 +561,20 @@ kbd {
   gap: 6px;
 }
 
+.provider-select {
+  max-width: 130px;
+  margin-right: 8px;
+  padding: 8px 28px 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  outline: 0;
+  background: var(--panel);
+  color: var(--muted);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 750;
+}
+
 .knowledge-button,
 .knowledge-chip,
 .memory-button,
@@ -1076,7 +1090,8 @@ h1 em {
 }
 
 .attachment-button,
-.web-chip {
+.web-chip,
+.tool-chip {
   padding: 5px 8px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -1097,6 +1112,38 @@ h1 em {
 .web-chip.active {
   border-color: color-mix(in srgb, var(--accent) 42%, var(--line));
   background: color-mix(in srgb, var(--accent) 9%, var(--panel));
+  color: var(--accent);
+}
+
+.tool-chip.active {
+  border-color: color-mix(in srgb, var(--green) 42%, var(--line));
+  background: color-mix(in srgb, var(--green) 10%, var(--panel));
+  color: var(--green);
+}
+
+.tool-event-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.tool-event-list span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.tool-event-list span.success b {
+  color: var(--green);
+}
+
+.tool-event-list span.error b {
   color: var(--accent);
 }
 
@@ -1786,6 +1833,11 @@ h1 em {
     min-width: 0;
     flex: 1;
     justify-content: center;
+  }
+
+  .provider-select {
+    max-width: 88px;
+    margin-right: 4px;
   }
 
   .model-picker strong {

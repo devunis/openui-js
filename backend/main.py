@@ -32,6 +32,7 @@ load_dotenv()
 
 from backend import database
 from backend.memory import build_memory_message
+from backend.providers import Provider, find_provider, load_providers
 from backend.rag import (
     MAX_FILE_BYTES,
     DocumentError,
@@ -47,6 +48,7 @@ from backend.security import (
     hash_session_token,
     verify_password,
 )
+from backend.tools import ToolError, available_tools, execute_tool, load_mcp_servers
 from backend.web_search import (
     WebSearchError,
     build_web_message,
@@ -89,6 +91,18 @@ class Settings:
         self.web_search_url = os.getenv("WEB_SEARCH_URL", "")
         self.web_search_api_key = os.getenv("WEB_SEARCH_API_KEY", "")
         self.web_search_result_count = int(os.getenv("WEB_SEARCH_RESULT_COUNT", "5"))
+        self.extra_providers = load_providers(
+            os.getenv("PROVIDERS_JSON", ""),
+            default_base_url=self.api_base_url,
+            default_api_key=self.api_key,
+            default_model=self.default_model,
+        )[1:]
+        self.mcp_servers = load_mcp_servers(os.getenv("MCP_SERVERS_JSON", ""))
+        self.enable_tools = os.getenv("ENABLE_TOOLS", "true").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
 
 
 MAX_IMAGE_BYTES = 2 * 1024 * 1024
@@ -131,6 +145,14 @@ class ImageAttachment(BaseModel):
         return self
 
 
+class ToolEvent(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    name: str = Field(min_length=1, max_length=100)
+    status: Literal["success", "error"]
+    result: str = Field(default="", max_length=1_000)
+
+
 class Message(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -143,12 +165,14 @@ class ChatRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     model: str = Field(min_length=1, max_length=200)
+    providerId: str = Field(default="default", min_length=1, max_length=50)
     messages: list[Message] = Field(min_length=1, max_length=500)
     temperature: float = Field(default=0.7, ge=0, le=2)
     documentIds: list[str] = Field(default_factory=list, max_length=50)
     useKnowledge: bool = False
     useMemory: bool = True
     useWeb: bool = False
+    useTools: bool = False
 
     @model_validator(mode="after")
     def attachment_budget(self) -> "ChatRequest":
@@ -183,6 +207,7 @@ class StoredMessage(BaseModel):
     content: str = Field(max_length=100_000)
     sources: list[WebSource] = Field(default_factory=list, max_length=10)
     attachments: list[ImageAttachment] = Field(default_factory=list, max_length=3)
+    toolEvents: list[ToolEvent] = Field(default_factory=list, max_length=20)
     createdAt: int = Field(ge=0)
 
 
@@ -192,8 +217,10 @@ class StoredChat(BaseModel):
     id: str = Field(min_length=1, max_length=100)
     title: str = Field(min_length=1, max_length=200)
     model: str = Field(min_length=1, max_length=200)
+    providerId: str = Field(default="default", min_length=1, max_length=50)
     useMemory: bool = True
     useWeb: bool = False
+    useTools: bool = False
     archived: bool = False
     createdAt: int = Field(ge=0)
     updatedAt: int = Field(ge=0)
@@ -274,10 +301,30 @@ database.init_db()
 SESSION_COOKIE = "openui_session"
 
 
-def upstream_headers() -> dict[str, str]:
+def configured_providers() -> list[Provider]:
+    return [
+        Provider(
+            id="default",
+            name="Default",
+            base_url=settings.api_base_url,
+            api_key=settings.api_key,
+            default_model=settings.default_model,
+        ),
+        *settings.extra_providers,
+    ]
+
+
+def resolve_provider(provider_id: str | None) -> Provider:
+    try:
+        return find_provider(configured_providers(), provider_id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Provider not found.")
+
+
+def upstream_headers(provider: Provider) -> dict[str, str]:
     headers = {"Content-Type": "application/json"}
-    if settings.api_key:
-        headers["Authorization"] = f"Bearer {settings.api_key}"
+    if provider.api_key:
+        headers["Authorization"] = f"Bearer {provider.api_key}"
     return headers
 
 
@@ -364,6 +411,8 @@ async def config() -> dict[str, object]:
         "registrationAllowed": settings.allow_registration,
         "memoriesEnabled": settings.enable_memories,
         "webSearchEnabled": settings.enable_web_search,
+        "toolsEnabled": settings.enable_tools,
+        "providers": [provider.public() for provider in configured_providers()],
     }
 
 
@@ -719,12 +768,16 @@ async def search_memory_bank(
 
 
 @app.get("/api/models")
-async def models(_user: Optional[dict[str, object]] = Depends(model_access)) -> Response:
+async def models(
+    providerId: str = "default",
+    _user: Optional[dict[str, object]] = Depends(model_access),
+) -> Response:
+    provider = resolve_provider(providerId)
     try:
         async with get_http_client() as client:
             upstream = await client.get(
-                f"{settings.api_base_url}/models",
-                headers=upstream_headers(),
+                f"{provider.base_url}/models",
+                headers=upstream_headers(provider),
             )
         return Response(
             content=upstream.content,
@@ -738,11 +791,176 @@ async def models(_user: Optional[dict[str, object]] = Depends(model_access)) -> 
         )
 
 
+@app.get("/api/tools")
+async def get_tools(
+    _user: Optional[dict[str, object]] = Depends(model_access),
+) -> dict[str, object]:
+    if not settings.enable_tools:
+        raise HTTPException(status_code=404, detail="Tool use is disabled.")
+    tools = await available_tools(settings.mcp_servers)
+    return {
+        "tools": [
+            {
+                "name": tool["function"]["name"],
+                "description": tool["function"].get("description", ""),
+            }
+            for tool in tools
+        ]
+    }
+
+
+async def tool_completion_response(
+    provider: Provider,
+    payload: ChatRequest,
+    messages: list[dict[str, object]],
+    web_sources: list[dict[str, str]],
+) -> Response:
+    if not settings.enable_tools:
+        raise HTTPException(status_code=404, detail="Tool use is disabled.")
+    tools = await available_tools(settings.mcp_servers)
+    tool_messages = list(messages)
+    tool_events: list[dict[str, str]] = []
+    final_content = ""
+
+    try:
+        async with get_http_client() as client:
+            for _round in range(4):
+                upstream = await client.post(
+                    f"{provider.base_url}/chat/completions",
+                    headers=upstream_headers(provider),
+                    json={
+                        "model": payload.model,
+                        "messages": tool_messages,
+                        "tools": tools,
+                        "tool_choice": "auto",
+                        "stream": False,
+                        "temperature": payload.temperature,
+                    },
+                )
+                if not upstream.is_success:
+                    return Response(
+                        content=upstream.content,
+                        status_code=upstream.status_code,
+                        media_type=upstream.headers.get(
+                            "content-type", "application/json"
+                        ),
+                    )
+                try:
+                    assistant = upstream.json()["choices"][0]["message"]
+                except (KeyError, IndexError, TypeError, json.JSONDecodeError):
+                    return JSONResponse(
+                        status_code=502,
+                        content={"error": {"message": "모델의 도구 응답 형식이 올바르지 않습니다."}},
+                    )
+                if not isinstance(assistant, dict):
+                    return JSONResponse(
+                        status_code=502,
+                        content={"error": {"message": "모델의 message 형식이 올바르지 않습니다."}},
+                    )
+                calls = assistant.get("tool_calls") or []
+                if not isinstance(calls, list):
+                    return JSONResponse(
+                        status_code=502,
+                        content={"error": {"message": "모델의 tool_calls 형식이 올바르지 않습니다."}},
+                    )
+                if len(calls) > 8:
+                    return JSONResponse(
+                        status_code=502,
+                        content={"error": {"message": "한 번에 요청된 도구 호출이 너무 많습니다."}},
+                    )
+                if not calls:
+                    final_content = str(assistant.get("content") or "")
+                    break
+                tool_messages.append(assistant)
+                for call in calls:
+                    if not isinstance(call, dict):
+                        return JSONResponse(
+                            status_code=502,
+                            content={"error": {"message": "잘못된 도구 호출 항목입니다."}},
+                        )
+                    function = call.get("function") or {}
+                    if not isinstance(function, dict):
+                        return JSONResponse(
+                            status_code=502,
+                            content={"error": {"message": "잘못된 도구 함수 항목입니다."}},
+                        )
+                    name = str(function.get("name") or "")
+                    try:
+                        arguments = json.loads(function.get("arguments") or "{}")
+                        if not isinstance(arguments, dict):
+                            raise ToolError("Tool arguments must be an object.")
+                        result = await execute_tool(name, arguments, settings.mcp_servers)
+                        serialized = json.dumps(result, ensure_ascii=False, default=str)
+                        status = "success"
+                    except (
+                        ToolError,
+                        httpx.HTTPError,
+                        json.JSONDecodeError,
+                    ) as exc:
+                        serialized = json.dumps(
+                            {"error": str(exc)},
+                            ensure_ascii=False,
+                        )
+                        status = "error"
+                    serialized = serialized[:20_000]
+                    tool_events.append(
+                        {
+                            "name": name,
+                            "status": status,
+                            "result": serialized[:500],
+                        }
+                    )
+                    tool_messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": str(call.get("id") or ""),
+                            "content": serialized,
+                        }
+                    )
+            else:
+                final_content = "도구 호출 횟수 제한에 도달했습니다."
+    except httpx.HTTPError as exc:
+        return JSONResponse(
+            status_code=502,
+            content={"error": {"message": f"모델 서버에 연결하지 못했습니다: {exc}"}},
+        )
+
+    async def stream():
+        metadata: dict[str, object] = {}
+        if web_sources:
+            metadata["sources"] = web_sources
+        if tool_events:
+            metadata["toolEvents"] = tool_events
+        if metadata:
+            yield (
+                "data: "
+                + json.dumps({"openui": metadata}, ensure_ascii=False)
+                + "\n\n"
+            ).encode()
+        if final_content:
+            yield (
+                "data: "
+                + json.dumps(
+                    {"choices": [{"delta": {"content": final_content}}]},
+                    ensure_ascii=False,
+                )
+                + "\n\n"
+            ).encode()
+        yield b"data: [DONE]\n\n"
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.post("/api/chat/completions")
 async def chat_completions(
     payload: ChatRequest,
     _user: Optional[dict[str, object]] = Depends(model_access),
 ) -> Response:
+    provider = resolve_provider(payload.providerId)
     messages = [upstream_message(message) for message in payload.messages]
     web_sources: list[dict[str, str]] = []
     user_message = next(
@@ -802,11 +1020,14 @@ async def chat_completions(
         if results:
             messages.insert(0, {"role": "system", "content": build_rag_message(results)})
 
+    if payload.useTools:
+        return await tool_completion_response(provider, payload, messages, web_sources)
+
     client = get_http_client()
     request = client.build_request(
         "POST",
-        f"{settings.api_base_url}/chat/completions",
-        headers=upstream_headers(),
+        f"{provider.base_url}/chat/completions",
+        headers=upstream_headers(provider),
         json={
             "model": payload.model,
             "messages": messages,
