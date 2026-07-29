@@ -227,6 +227,94 @@ function AuthModal({
   );
 }
 
+function KnowledgeDrawer({
+  open,
+  documents,
+  selectedIds,
+  enabled,
+  uploading,
+  error,
+  onClose,
+  onToggleEnabled,
+  onToggleDocument,
+  onUpload,
+  onDelete
+}) {
+  if (!open) return null;
+  return (
+    <>
+      <div className="drawer-backdrop" role="presentation" onClick={onClose} />
+      <aside className="knowledge-drawer" aria-label="지식 문서">
+        <div className="drawer-header">
+          <div>
+            <p className="eyebrow">LOCAL KNOWLEDGE</p>
+            <h2>내 문서</h2>
+          </div>
+          <button className="icon-button" type="button" aria-label="닫기" onClick={onClose}>
+            ×
+          </button>
+        </div>
+        <p className="drawer-copy">
+          TXT, Markdown, PDF를 추가하면 질문과 관련된 부분만 찾아 답변에 참고합니다.
+        </p>
+        <label className="knowledge-toggle">
+          <span>
+            <strong>문서 검색 사용</strong>
+            <small>{selectedIds.length}개 문서 선택됨</small>
+          </span>
+          <input type="checkbox" checked={enabled} onChange={onToggleEnabled} />
+        </label>
+        <label className={`upload-button${uploading ? " busy" : ""}`}>
+          <input
+            type="file"
+            accept=".txt,.md,.markdown,.pdf"
+            disabled={uploading}
+            onChange={onUpload}
+          />
+          {uploading ? "문서 처리 중…" : "＋ 문서 업로드"}
+        </label>
+        <p className="upload-hint">파일당 최대 10MB · 원본 파일은 저장하지 않음</p>
+        {error ? <p className="knowledge-error">{error}</p> : null}
+        <div className="document-list">
+          {documents.length ? (
+            documents.map((document) => (
+              <div className="document-item" key={document.id}>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={selectedIds.includes(document.id)}
+                    onChange={() => onToggleDocument(document.id)}
+                  />
+                  <span>
+                    <strong>{document.filename}</strong>
+                    <small>
+                      {document.chunkCount}개 조각 ·{" "}
+                      {Math.max(1, Math.ceil(document.sizeBytes / 1024))}KB
+                    </small>
+                  </span>
+                </label>
+                <button
+                  type="button"
+                  aria-label={`${document.filename} 삭제`}
+                  onClick={() => onDelete(document.id)}
+                >
+                  ×
+                </button>
+              </div>
+            ))
+          ) : (
+            <div className="document-empty">
+              <span aria-hidden="true">⌁</span>
+              <strong>아직 문서가 없어요</strong>
+              <small>업로드하면 질문할 때 자동으로 검색합니다.</small>
+            </div>
+          )}
+        </div>
+      </aside>
+    </>
+  );
+}
+
 export default function App() {
   const saved = useMemo(loadSavedState, []);
   const [chats, setChats] = useState(saved.chats);
@@ -247,6 +335,12 @@ export default function App() {
   const [authError, setAuthError] = useState("");
   const [authRequired, setAuthRequired] = useState(true);
   const [registrationAllowed, setRegistrationAllowed] = useState(true);
+  const [documents, setDocuments] = useState([]);
+  const [selectedDocumentIds, setSelectedDocumentIds] = useState([]);
+  const [knowledgeOpen, setKnowledgeOpen] = useState(false);
+  const [knowledgeEnabled, setKnowledgeEnabled] = useState(true);
+  const [uploading, setUploading] = useState(false);
+  const [documentError, setDocumentError] = useState("");
   const [syncStatus, setSyncStatus] = useState("로컬 저장");
   const [connection, setConnection] = useState({
     status: "loading",
@@ -342,6 +436,30 @@ export default function App() {
   }, [chats, user, selectedModel, defaultModel]);
 
   useEffect(() => {
+    if (!user) {
+      setDocuments([]);
+      setSelectedDocumentIds([]);
+      return;
+    }
+    let cancelled = false;
+    fetch("/api/documents")
+      .then(async (response) => {
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.detail || "문서를 불러오지 못했습니다.");
+        if (!cancelled) {
+          setDocuments(payload.documents);
+          setSelectedDocumentIds(payload.documents.map((document) => document.id));
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) setDocumentError(error.message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
+
+  useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem(THEME_KEY, theme);
     document.querySelector('meta[name="theme-color"]').content =
@@ -411,6 +529,7 @@ export default function App() {
         setModelMenuOpen(false);
         setSidebarOpen(false);
         setAuthOpen(false);
+        setKnowledgeOpen(false);
       }
     };
     document.addEventListener("click", handleClick);
@@ -511,7 +630,46 @@ export default function App() {
     setUser(null);
     setChats([]);
     setActiveChatId(null);
+    setKnowledgeOpen(false);
     setSyncStatus("로컬 저장");
+  }
+
+  async function uploadDocument(event) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file || uploading) return;
+    setUploading(true);
+    setDocumentError("");
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const response = await fetch("/api/documents/upload", {
+        method: "POST",
+        body: form
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || "문서를 업로드하지 못했습니다.");
+      setDocuments((current) => [payload.document, ...current]);
+      setSelectedDocumentIds((current) => [...current, payload.document.id]);
+    } catch (error) {
+      setDocumentError(error.message);
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  async function deleteDocument(documentId) {
+    setDocumentError("");
+    try {
+      const response = await fetch(`/api/documents/${encodeURIComponent(documentId)}`, {
+        method: "DELETE"
+      });
+      if (!response.ok) throw new Error("문서를 삭제하지 못했습니다.");
+      setDocuments((current) => current.filter((document) => document.id !== documentId));
+      setSelectedDocumentIds((current) => current.filter((id) => id !== documentId));
+    } catch (error) {
+      setDocumentError(error.message);
+    }
   }
 
   async function submitMessage(event) {
@@ -569,7 +727,9 @@ export default function App() {
             role,
             content: text
           })),
-          temperature: 0.7
+          temperature: 0.7,
+          useKnowledge: knowledgeEnabled && selectedDocumentIds.length > 0,
+          documentIds: selectedDocumentIds
         }),
         signal: abortRef.current.signal
       });
@@ -798,6 +958,20 @@ export default function App() {
           </div>
           <div className="topbar-actions">
             <button
+              className={`knowledge-button${knowledgeEnabled && documents.length ? " active" : ""}`}
+              type="button"
+              onClick={() => {
+                if (!user) {
+                  setAuthOpen(true);
+                  return;
+                }
+                setKnowledgeOpen(true);
+              }}
+            >
+              <span aria-hidden="true">⌁</span>
+              지식 {documents.length}
+            </button>
+            <button
               className="icon-button"
               type="button"
               aria-label="현재 대화 비우기"
@@ -900,9 +1074,19 @@ export default function App() {
               }}
             />
             <div className="composer-bottom">
-              <span className="composer-hint">
-                <kbd>Enter</kbd> 전송 · <kbd>Shift Enter</kbd> 줄바꿈
-              </span>
+              {knowledgeEnabled && selectedDocumentIds.length ? (
+                <button
+                  className="knowledge-chip"
+                  type="button"
+                  onClick={() => setKnowledgeOpen(true)}
+                >
+                  ⌁ 문서 {selectedDocumentIds.length}개 검색
+                </button>
+              ) : (
+                <span className="composer-hint">
+                  <kbd>Enter</kbd> 전송 · <kbd>Shift Enter</kbd> 줄바꿈
+                </span>
+              )}
               <button
                 className="send-button"
                 type="submit"
@@ -932,6 +1116,25 @@ export default function App() {
           onSubmit={authenticate}
         />
       ) : null}
+      <KnowledgeDrawer
+        open={knowledgeOpen}
+        documents={documents}
+        selectedIds={selectedDocumentIds}
+        enabled={knowledgeEnabled}
+        uploading={uploading}
+        error={documentError}
+        onClose={() => setKnowledgeOpen(false)}
+        onToggleEnabled={() => setKnowledgeEnabled((enabled) => !enabled)}
+        onToggleDocument={(documentId) =>
+          setSelectedDocumentIds((current) =>
+            current.includes(documentId)
+              ? current.filter((id) => id !== documentId)
+              : [...current, documentId]
+          )
+        }
+        onUpload={uploadDocument}
+        onDelete={deleteDocument}
+      />
     </div>
   );
 }

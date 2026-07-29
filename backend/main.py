@@ -8,16 +8,33 @@ from pathlib import Path
 from typing import Literal, Optional
 
 import httpx
-from fastapi import Cookie, Depends, FastAPI, HTTPException, Response as FastAPIResponse
+from fastapi import (
+    Cookie,
+    Depends,
+    FastAPI,
+    File,
+    HTTPException,
+    Response as FastAPIResponse,
+    UploadFile,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from starlette.concurrency import run_in_threadpool
 
 load_dotenv()
 
 from backend import database
+from backend.rag import (
+    MAX_FILE_BYTES,
+    DocumentError,
+    build_rag_message,
+    chunk_text,
+    clean_filename,
+    extract_text,
+)
 from backend.security import (
     cookie_secure,
     create_session_token,
@@ -58,6 +75,8 @@ class ChatRequest(BaseModel):
     model: str = Field(min_length=1, max_length=200)
     messages: list[Message] = Field(min_length=1, max_length=500)
     temperature: float = Field(default=0.7, ge=0, le=2)
+    documentIds: list[str] = Field(default_factory=list, max_length=50)
+    useKnowledge: bool = False
 
 
 class Credentials(BaseModel):
@@ -95,6 +114,12 @@ class StoredChat(BaseModel):
 
 class ChatSyncRequest(BaseModel):
     chats: list[StoredChat] = Field(max_length=500)
+
+
+class RagSearchRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=10_000)
+    documentIds: list[str] = Field(default_factory=list, max_length=50)
+    limit: int = Field(default=5, ge=1, le=10)
 
 
 settings = Settings()
@@ -273,6 +298,65 @@ async def remove_chat(
     database.delete_chat(str(user["id"]), chat_id)
 
 
+@app.get("/api/documents")
+async def get_documents(
+    user: dict[str, object] = Depends(current_user),
+) -> dict[str, object]:
+    return {"documents": database.list_documents(str(user["id"]))}
+
+
+@app.post("/api/documents/upload", status_code=201)
+async def upload_document(
+    file: UploadFile = File(...),
+    user: dict[str, object] = Depends(current_user),
+) -> dict[str, object]:
+    filename = clean_filename(file.filename)
+    try:
+        content = await file.read(MAX_FILE_BYTES + 1)
+    finally:
+        await file.close()
+    if len(content) > MAX_FILE_BYTES:
+        raise HTTPException(status_code=413, detail="파일은 최대 10MB까지 업로드할 수 있습니다.")
+
+    try:
+        text, content_type = await run_in_threadpool(extract_text, filename, content)
+        chunks = await run_in_threadpool(chunk_text, text)
+    except DocumentError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    document = database.create_document(
+        str(user["id"]),
+        filename,
+        content_type,
+        len(content),
+        chunks,
+    )
+    return {"document": document}
+
+
+@app.delete("/api/documents/{document_id}", status_code=204)
+async def remove_document(
+    document_id: str,
+    user: dict[str, object] = Depends(current_user),
+) -> None:
+    if not database.delete_document(str(user["id"]), document_id):
+        raise HTTPException(status_code=404, detail="Document not found.")
+
+
+@app.post("/api/rag/search")
+async def search_knowledge(
+    payload: RagSearchRequest,
+    user: dict[str, object] = Depends(current_user),
+) -> dict[str, object]:
+    results = database.search_document_chunks(
+        str(user["id"]),
+        payload.query,
+        payload.documentIds or None,
+        payload.limit,
+    )
+    return {"results": results}
+
+
 @app.get("/api/models")
 async def models(_user: Optional[dict[str, object]] = Depends(model_access)) -> Response:
     try:
@@ -298,6 +382,25 @@ async def chat_completions(
     payload: ChatRequest,
     _user: Optional[dict[str, object]] = Depends(model_access),
 ) -> Response:
+    messages = [message.model_dump() for message in payload.messages]
+    if payload.useKnowledge and _user:
+        user_message = next(
+            (
+                message.content
+                for message in reversed(payload.messages)
+                if message.role == "user"
+            ),
+            "",
+        )
+        results = database.search_document_chunks(
+            str(_user["id"]),
+            user_message,
+            payload.documentIds or None,
+            5,
+        )
+        if results:
+            messages.insert(0, {"role": "system", "content": build_rag_message(results)})
+
     client = get_http_client()
     request = client.build_request(
         "POST",
@@ -305,7 +408,7 @@ async def chat_completions(
         headers=upstream_headers(),
         json={
             "model": payload.model,
-            "messages": [message.model_dump() for message in payload.messages],
+            "messages": messages,
             "stream": True,
             "temperature": payload.temperature,
         },

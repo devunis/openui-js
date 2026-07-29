@@ -12,6 +12,8 @@ Svelte 없이 **React와 바닐라 JavaScript 두 가지 프런트엔드**를 �
 - Python/FastAPI 스트리밍 프록시
 - 이메일 회원가입·로그인과 HttpOnly 세션
 - 사용자별 SQLite 대화 저장·동기화
+- TXT·Markdown·PDF 문서 업로드와 사용자별 지식 저장소
+- SQLite FTS5 기반 관련 문서 검색과 출처 태그 RAG
 - OpenAI 호환 `/v1` API 지원
 - Ollama의 OpenAI 호환 API 지원
 - 실시간 스트리밍 응답
@@ -91,13 +93,22 @@ npm run check
 
 `npm run build` 후 FastAPI를 실행하면 React는 <http://127.0.0.1:8000/react/>, Vanilla JS는 <http://127.0.0.1:8000/vanilla/>에서 동시에 사용할 수 있습니다.
 
+## 문서 검색(RAG)
+
+로그인 후 상단의 **지식** 버튼에서 `.txt`, `.md`, `.markdown`, `.pdf` 파일을 올릴 수 있습니다. 파일당 최대 크기는 10MB이며 PDF는 최대 500페이지까지 처리합니다.
+
+업로드된 텍스트는 작은 조각으로 나뉘어 SQLite에 저장되고, 질문할 때 FTS5 키워드 검색 결과가 모델 입력에 `[Source N]` 형식으로 추가됩니다. 별도의 임베딩 모델이나 벡터 데이터베이스는 필요하지 않습니다. 스캔 이미지로만 구성된 PDF에는 OCR이 적용되지 않습니다.
+
+개인정보 노출 범위를 줄이기 위해 원본 파일 바이트는 보관하지 않으며, 추출된 텍스트 조각과 파일명·크기 등의 메타데이터만 저장합니다. 문서를 삭제하면 검색 인덱스와 텍스트 조각도 함께 삭제됩니다.
+
 ## 구조
 
 ```text
 .
 ├── backend/
 │   ├── main.py         # FastAPI + OpenAI 호환 스트리밍 프록시
-│   ├── database.py     # SQLite 사용자·세션·대화 저장소
+│   ├── database.py     # SQLite 사용자·세션·대화·문서 저장소
+│   ├── rag.py          # 텍스트 추출·청킹·RAG 컨텍스트
 │   ├── security.py     # 비밀번호와 세션 토큰 보안
 │   └── test_main.py    # 백엔드 API 테스트
 ├── frontends/
@@ -114,6 +125,8 @@ npm run check
 - 비밀번호는 PBKDF2-SHA256으로, 로그인 토큰은 SHA-256으로 해시해 저장합니다.
 - 로그인 쿠키는 HttpOnly와 SameSite=Lax로 제한됩니다.
 - 사용자별 대화 소유권은 모든 저장 API에서 서버가 확인합니다.
+- 문서 목록·검색·삭제도 로그인 사용자별로 격리합니다.
+- 검색된 문서 내용은 신뢰할 수 없는 참고 데이터로 표시해 모델에 전달합니다.
 - 모델·채팅 API는 기본적으로 로그인한 사용자만 호출할 수 있습니다.
 - 첫 운영 계정을 만든 뒤 `ALLOW_REGISTRATION=false`로 설정하면 추가 가입을 막을 수 있습니다.
 - 이 앱은 개인/로컬 사용을 위한 경량 구현입니다.

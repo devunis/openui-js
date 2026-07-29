@@ -23,9 +23,21 @@ const elements = {
   composer: $("#composer"),
   connectionDetail: $("#connectionDetail"),
   connectionTitle: $("#connectionTitle"),
+  composerHint: $("#composerHint"),
   conversation: $("#conversation"),
+  documentList: $("#documentList"),
+  documentUpload: $("#documentUpload"),
   emptyState: $("#emptyState"),
   input: $("#messageInput"),
+  knowledgeBackdrop: $("#knowledgeBackdrop"),
+  knowledgeButton: $("#knowledgeButton"),
+  knowledgeChip: $("#knowledgeChip"),
+  knowledgeClose: $("#knowledgeClose"),
+  knowledgeCount: $("#knowledgeCount"),
+  knowledgeDrawer: $("#knowledgeDrawer"),
+  knowledgeEnabled: $("#knowledgeEnabled"),
+  knowledgeError: $("#knowledgeError"),
+  knowledgeSelectionLabel: $("#knowledgeSelectionLabel"),
   messageList: $("#messageList"),
   messageTemplate: $("#messageTemplate"),
   modelMenu: $("#modelMenu"),
@@ -34,13 +46,16 @@ const elements = {
   newChat: $("#newChat"),
   openSidebar: $("#openSidebar"),
   selectedModel: $("#selectedModel"),
+  selectedKnowledgeCount: $("#selectedKnowledgeCount"),
   sendButton: $("#sendButton"),
   sidebar: $("#sidebar"),
   statusDot: $("#statusDot"),
   storageMessage: $("#storageMessage"),
   themeButton: $("#themeButton"),
   themeIcon: $("#themeIcon"),
-  themeLabel: $("#themeLabel")
+  themeLabel: $("#themeLabel"),
+  uploadButton: $("#uploadButton"),
+  uploadLabel: $("#uploadLabel")
 };
 
 const state = {
@@ -55,6 +70,10 @@ const state = {
   authMode: "login",
   authRequired: true,
   registrationAllowed: true,
+  documents: [],
+  selectedDocumentIds: [],
+  knowledgeEnabled: true,
+  uploading: false,
   syncStatus: "로컬 저장",
   syncTimer: null
 };
@@ -251,7 +270,136 @@ function render() {
   renderChats();
   renderMessages();
   renderAccount();
+  renderDocuments();
   updateAccess();
+}
+
+function renderDocuments() {
+  elements.documentList.replaceChildren();
+  elements.knowledgeCount.textContent = state.documents.length;
+  elements.selectedKnowledgeCount.textContent = state.selectedDocumentIds.length;
+  elements.knowledgeSelectionLabel.textContent =
+    `${state.selectedDocumentIds.length}개 문서 선택됨`;
+  elements.knowledgeButton.classList.toggle(
+    "active",
+    state.knowledgeEnabled && state.documents.length > 0
+  );
+  const knowledgeActive =
+    state.knowledgeEnabled && state.selectedDocumentIds.length > 0;
+  elements.knowledgeChip.hidden = !knowledgeActive;
+  elements.composerHint.hidden = knowledgeActive;
+  elements.knowledgeEnabled.checked = state.knowledgeEnabled;
+
+  if (!state.documents.length) {
+    const empty = document.createElement("div");
+    empty.className = "document-empty";
+    empty.innerHTML =
+      '<span aria-hidden="true">⌁</span><strong>아직 문서가 없어요</strong><small>업로드하면 질문할 때 자동으로 검색합니다.</small>';
+    elements.documentList.append(empty);
+    return;
+  }
+
+  for (const storedDocument of state.documents) {
+    const item = document.createElement("div");
+    item.className = "document-item";
+    item.innerHTML =
+      '<label><input type="checkbox"><span><strong></strong><small></small></span></label><button type="button" aria-label="문서 삭제">×</button>';
+    const checkbox = item.querySelector("input");
+    checkbox.checked = state.selectedDocumentIds.includes(storedDocument.id);
+    checkbox.addEventListener("change", () => {
+      state.selectedDocumentIds = checkbox.checked
+        ? [...state.selectedDocumentIds, storedDocument.id]
+        : state.selectedDocumentIds.filter((id) => id !== storedDocument.id);
+      renderDocuments();
+    });
+    item.querySelector("strong").textContent = storedDocument.filename;
+    item.querySelector("small").textContent =
+      `${storedDocument.chunkCount}개 조각 · ${Math.max(1, Math.ceil(storedDocument.sizeBytes / 1024))}KB`;
+    item.querySelector("button").addEventListener("click", () =>
+      deleteDocument(storedDocument.id)
+    );
+    elements.documentList.append(item);
+  }
+}
+
+async function loadDocuments() {
+  if (!state.user) {
+    state.documents = [];
+    state.selectedDocumentIds = [];
+    renderDocuments();
+    return;
+  }
+  try {
+    const response = await fetch("/api/documents");
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.detail || "문서를 불러오지 못했습니다.");
+    state.documents = payload.documents;
+    state.selectedDocumentIds = payload.documents.map((document) => document.id);
+    elements.knowledgeError.hidden = true;
+  } catch (error) {
+    elements.knowledgeError.textContent = error.message;
+    elements.knowledgeError.hidden = false;
+  }
+  renderDocuments();
+}
+
+function openKnowledge() {
+  if (!state.user) {
+    openAuth();
+    return;
+  }
+  elements.knowledgeDrawer.hidden = false;
+  elements.knowledgeBackdrop.hidden = false;
+}
+
+function closeKnowledge() {
+  elements.knowledgeDrawer.hidden = true;
+  elements.knowledgeBackdrop.hidden = true;
+}
+
+async function uploadDocument() {
+  const file = elements.documentUpload.files?.[0];
+  elements.documentUpload.value = "";
+  if (!file || state.uploading) return;
+  state.uploading = true;
+  elements.documentUpload.disabled = true;
+  elements.uploadButton.classList.add("busy");
+  elements.uploadLabel.textContent = "문서 처리 중…";
+  elements.knowledgeError.hidden = true;
+  try {
+    const form = new FormData();
+    form.append("file", file);
+    const response = await fetch("/api/documents/upload", { method: "POST", body: form });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.detail || "문서를 업로드하지 못했습니다.");
+    state.documents.unshift(payload.document);
+    state.selectedDocumentIds.push(payload.document.id);
+    renderDocuments();
+  } catch (error) {
+    elements.knowledgeError.textContent = error.message;
+    elements.knowledgeError.hidden = false;
+  } finally {
+    state.uploading = false;
+    elements.documentUpload.disabled = false;
+    elements.uploadButton.classList.remove("busy");
+    elements.uploadLabel.textContent = "＋ 문서 업로드";
+  }
+}
+
+async function deleteDocument(documentId) {
+  elements.knowledgeError.hidden = true;
+  try {
+    const response = await fetch(`/api/documents/${encodeURIComponent(documentId)}`, {
+      method: "DELETE"
+    });
+    if (!response.ok) throw new Error("문서를 삭제하지 못했습니다.");
+    state.documents = state.documents.filter((document) => document.id !== documentId);
+    state.selectedDocumentIds = state.selectedDocumentIds.filter((id) => id !== documentId);
+    renderDocuments();
+  } catch (error) {
+    elements.knowledgeError.textContent = error.message;
+    elements.knowledgeError.hidden = false;
+  }
 }
 
 function newChat() {
@@ -364,6 +512,7 @@ async function authenticate() {
       throw new Error(payload.detail || "인증 요청을 처리하지 못했습니다.");
     }
     state.user = payload.user;
+    await loadDocuments();
     state.syncStatus = "동기화 중";
     try {
       const sync = await fetch("/api/chats/sync", {
@@ -402,6 +551,9 @@ async function logout() {
   state.user = null;
   state.chats = [];
   state.activeChatId = null;
+  state.documents = [];
+  state.selectedDocumentIds = [];
+  closeKnowledge();
   state.syncStatus = "로컬 저장";
   save();
   render();
@@ -418,6 +570,7 @@ async function restoreSession() {
     }
     const payload = await response.json();
     state.user = payload.user;
+    await loadDocuments();
     state.syncStatus = "동기화 중";
     renderAccount();
     try {
@@ -498,7 +651,9 @@ async function sendMessage(content) {
       body: JSON.stringify({
         model: state.selectedModel || state.defaultModel,
         messages: requestMessages.map(({ role, content: text }) => ({ role, content: text })),
-        temperature: 0.7
+        temperature: 0.7,
+        useKnowledge: state.knowledgeEnabled && state.selectedDocumentIds.length > 0,
+        documentIds: state.selectedDocumentIds
       }),
       signal: state.controller.signal
     });
@@ -645,6 +800,15 @@ elements.backdrop.addEventListener("click", closeSidebar);
 elements.themeButton.addEventListener("click", () =>
   setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark")
 );
+elements.knowledgeButton.addEventListener("click", openKnowledge);
+elements.knowledgeChip.addEventListener("click", openKnowledge);
+elements.knowledgeClose.addEventListener("click", closeKnowledge);
+elements.knowledgeBackdrop.addEventListener("click", closeKnowledge);
+elements.knowledgeEnabled.addEventListener("change", () => {
+  state.knowledgeEnabled = elements.knowledgeEnabled.checked;
+  renderDocuments();
+});
+elements.documentUpload.addEventListener("change", uploadDocument);
 elements.authForm.addEventListener("submit", (event) => {
   event.preventDefault();
   authenticate();
@@ -668,6 +832,7 @@ document.addEventListener("keydown", (event) => {
     elements.modelMenu.classList.remove("open");
     closeSidebar();
     closeAuth();
+    closeKnowledge();
   }
 });
 document.querySelectorAll(".suggestion").forEach((button) =>
