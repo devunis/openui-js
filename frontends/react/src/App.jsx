@@ -33,12 +33,13 @@ function makeId() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function createChat(model = "llama3.2") {
+function createChat(model = "llama3.2", useMemory = true) {
   const now = Date.now();
   return {
     id: makeId(),
     title: "새 대화",
     model,
+    useMemory,
     createdAt: now,
     updatedAt: now,
     messages: []
@@ -50,6 +51,7 @@ function normalizeChat(chat, fallbackModel = "llama3.2") {
     ...chat,
     title: chat.title || "새 대화",
     model: chat.model || fallbackModel,
+    useMemory: chat.useMemory !== false,
     createdAt: chat.createdAt || Date.now(),
     updatedAt: chat.updatedAt || chat.createdAt || Date.now(),
     messages: Array.isArray(chat.messages) ? chat.messages : []
@@ -114,7 +116,7 @@ function BrandMark({ hero = false }) {
   );
 }
 
-function Message({ message, streaming }) {
+function Message({ message, streaming, onRemember }) {
   const [copied, setCopied] = useState(false);
 
   const copy = async () => {
@@ -138,6 +140,16 @@ function Message({ message, streaming }) {
           <button className="copy-button" type="button" onClick={copy}>
             {copied ? "복사됨" : "복사"}
           </button>
+          {onRemember ? (
+            <button
+              className="copy-button"
+              type="button"
+              disabled={streaming || !message.content}
+              onClick={() => onRemember(message.content)}
+            >
+              기억하기
+            </button>
+          ) : null}
         </div>
       </div>
     </article>
@@ -315,6 +327,116 @@ function KnowledgeDrawer({
   );
 }
 
+function MemoryDrawer({
+  open,
+  memories,
+  enabled,
+  draft,
+  type,
+  editingId,
+  saving,
+  error,
+  onClose,
+  onToggleEnabled,
+  onDraftChange,
+  onTypeChange,
+  onSubmit,
+  onEdit,
+  onCancelEdit,
+  onDelete,
+  onClear
+}) {
+  if (!open) return null;
+  return (
+    <>
+      <div className="drawer-backdrop" role="presentation" onClick={onClose} />
+      <aside className="memory-drawer" aria-label="개인 메모리">
+        <div className="drawer-header">
+          <div>
+            <p className="eyebrow">PERSONAL MEMORY</p>
+            <h2>내 메모리</h2>
+          </div>
+          <button className="icon-button" type="button" aria-label="닫기" onClick={onClose}>
+            ×
+          </button>
+        </div>
+        <p className="drawer-copy">
+          선호와 오래 유지할 맥락을 저장하면 새 대화에서도 필요한 내용을 참고합니다.
+        </p>
+        <label className="knowledge-toggle">
+          <span>
+            <strong>채팅에서 메모리 사용</strong>
+            <small>{memories.length}개 저장됨</small>
+          </span>
+          <input type="checkbox" checked={enabled} onChange={onToggleEnabled} />
+        </label>
+        <form className="memory-form" onSubmit={onSubmit}>
+          <textarea
+            rows="4"
+            maxLength="4000"
+            value={draft}
+            onChange={(event) => onDraftChange(event.target.value)}
+            placeholder="예: 답변은 항상 한국어로 해줘"
+            aria-label="메모리 내용"
+            required
+          />
+          <div className="memory-form-row">
+            <select value={type} onChange={(event) => onTypeChange(event.target.value)}>
+              <option value="user">내 정보·선호</option>
+              <option value="context">장기 맥락</option>
+            </select>
+            {editingId ? (
+              <button className="memory-cancel" type="button" onClick={onCancelEdit}>
+                취소
+              </button>
+            ) : null}
+            <button className="memory-save" type="submit" disabled={saving || !draft.trim()}>
+              {saving ? "저장 중…" : editingId ? "수정 저장" : "메모리 추가"}
+            </button>
+          </div>
+        </form>
+        <p className="memory-hint">
+          비밀번호, API 키, 인증 토큰 같은 민감정보는 저장하지 마세요.
+        </p>
+        {error ? <p className="knowledge-error">{error}</p> : null}
+        <div className="memory-list">
+          {memories.length ? (
+            memories.map((memory) => (
+              <article className="memory-item" key={memory.id}>
+                <div>
+                  <span className={`memory-type ${memory.type}`}>
+                    {memory.type === "user" ? "내 정보" : "맥락"}
+                  </span>
+                  <p>{memory.content}</p>
+                </div>
+                <div className="memory-actions">
+                  <button type="button" onClick={() => onEdit(memory)}>
+                    수정
+                  </button>
+                  <button type="button" onClick={() => onDelete(memory.id)}>
+                    삭제
+                  </button>
+                </div>
+              </article>
+            ))
+          ) : (
+            <div className="document-empty">
+              <span aria-hidden="true">✦</span>
+              <strong>아직 기억한 내용이 없어요</strong>
+              <small>직접 추가하거나 메시지에서 기억하기를 누르세요.</small>
+            </div>
+          )}
+        </div>
+        {memories.length ? (
+          <button className="memory-clear" type="button" onClick={onClear}>
+            모든 메모리 삭제
+          </button>
+        ) : null}
+      </aside>
+    </>
+  );
+}
+
 export default function App() {
   const saved = useMemo(loadSavedState, []);
   const [chats, setChats] = useState(saved.chats);
@@ -341,6 +463,15 @@ export default function App() {
   const [knowledgeEnabled, setKnowledgeEnabled] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [documentError, setDocumentError] = useState("");
+  const [memories, setMemories] = useState([]);
+  const [memoryOpen, setMemoryOpen] = useState(false);
+  const [memoryEnabled, setMemoryEnabled] = useState(true);
+  const [memoriesAvailable, setMemoriesAvailable] = useState(true);
+  const [memoryDraft, setMemoryDraft] = useState("");
+  const [memoryType, setMemoryType] = useState("user");
+  const [editingMemoryId, setEditingMemoryId] = useState(null);
+  const [memorySaving, setMemorySaving] = useState(false);
+  const [memoryError, setMemoryError] = useState("");
   const [syncStatus, setSyncStatus] = useState("로컬 저장");
   const [connection, setConnection] = useState({
     status: "loading",
@@ -362,6 +493,7 @@ export default function App() {
     () => chats.find((chat) => chat.id === activeChatId),
     [chats, activeChatId]
   );
+  const memoryUseEnabled = activeChat?.useMemory ?? memoryEnabled;
 
   useEffect(() => {
     localStorage.setItem(
@@ -460,6 +592,26 @@ export default function App() {
   }, [user]);
 
   useEffect(() => {
+    if (!user || !memoriesAvailable) {
+      setMemories([]);
+      return;
+    }
+    let cancelled = false;
+    fetch("/api/memories")
+      .then(async (response) => {
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.detail || "메모리를 불러오지 못했습니다.");
+        if (!cancelled) setMemories(payload.memories);
+      })
+      .catch((error) => {
+        if (!cancelled) setMemoryError(error.message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [user, memoriesAvailable]);
+
+  useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem(THEME_KEY, theme);
     document.querySelector('meta[name="theme-color"]').content =
@@ -485,6 +637,7 @@ export default function App() {
         setDefaultModel(config.defaultModel);
         setAuthRequired(config.authRequired !== false);
         setRegistrationAllowed(config.registrationAllowed !== false);
+        setMemoriesAvailable(config.memoriesEnabled !== false);
         const host = new URL(config.apiBaseUrl).host;
         if (config.authRequired !== false && !user) {
           setSelectedModel((current) => current || config.defaultModel);
@@ -530,6 +683,7 @@ export default function App() {
         setSidebarOpen(false);
         setAuthOpen(false);
         setKnowledgeOpen(false);
+        setMemoryOpen(false);
       }
     };
     document.addEventListener("click", handleClick);
@@ -555,7 +709,7 @@ export default function App() {
       setAuthOpen(true);
       return null;
     }
-    const chat = createChat(selectedModel || defaultModel);
+    const chat = createChat(selectedModel || defaultModel, memoryEnabled);
     setChats((current) => [chat, ...current]);
     setActiveChatId(chat.id);
     setSidebarOpen(false);
@@ -631,7 +785,90 @@ export default function App() {
     setChats([]);
     setActiveChatId(null);
     setKnowledgeOpen(false);
+    setMemoryOpen(false);
+    setMemories([]);
     setSyncStatus("로컬 저장");
+  }
+
+  function openMemoryWithDraft(content = "", type = "user") {
+    if (!user) {
+      setAuthOpen(true);
+      return;
+    }
+    setMemoryError("");
+    setEditingMemoryId(null);
+    setMemoryDraft(content.slice(0, 4000));
+    setMemoryType(type);
+    setMemoryOpen(true);
+  }
+
+  function resetMemoryForm() {
+    setEditingMemoryId(null);
+    setMemoryDraft("");
+    setMemoryType("user");
+  }
+
+  async function saveMemory(event) {
+    event.preventDefault();
+    const content = memoryDraft.trim();
+    if (!content || memorySaving) return;
+    setMemorySaving(true);
+    setMemoryError("");
+    try {
+      const editing = Boolean(editingMemoryId);
+      const response = await fetch(
+        editing ? `/api/memories/${encodeURIComponent(editingMemoryId)}` : "/api/memories",
+        {
+          method: editing ? "PUT" : "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            content,
+            type: memoryType,
+            ...(editing ? {} : { sourceChatId: activeChatId })
+          })
+        }
+      );
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || "메모리를 저장하지 못했습니다.");
+      setMemories((current) =>
+        editing
+          ? current.map((memory) =>
+              memory.id === payload.memory.id ? payload.memory : memory
+            )
+          : [payload.memory, ...current]
+      );
+      resetMemoryForm();
+    } catch (error) {
+      setMemoryError(error.message);
+    } finally {
+      setMemorySaving(false);
+    }
+  }
+
+  async function deleteMemory(memoryId) {
+    setMemoryError("");
+    try {
+      const response = await fetch(`/api/memories/${encodeURIComponent(memoryId)}`, {
+        method: "DELETE"
+      });
+      if (!response.ok) throw new Error("메모리를 삭제하지 못했습니다.");
+      setMemories((current) => current.filter((memory) => memory.id !== memoryId));
+      if (editingMemoryId === memoryId) resetMemoryForm();
+    } catch (error) {
+      setMemoryError(error.message);
+    }
+  }
+
+  async function clearMemories() {
+    setMemoryError("");
+    try {
+      const response = await fetch("/api/memories", { method: "DELETE" });
+      if (!response.ok) throw new Error("메모리를 초기화하지 못했습니다.");
+      setMemories([]);
+      resetMemoryForm();
+    } catch (error) {
+      setMemoryError(error.message);
+    }
   }
 
   async function uploadDocument(event) {
@@ -683,7 +920,7 @@ export default function App() {
 
     let chat = activeChat;
     if (!chat) {
-      chat = createChat(selectedModel || defaultModel);
+      chat = createChat(selectedModel || defaultModel, memoryEnabled);
       setChats((current) => [chat, ...current]);
       setActiveChatId(chat.id);
     }
@@ -729,7 +966,8 @@ export default function App() {
           })),
           temperature: 0.7,
           useKnowledge: knowledgeEnabled && selectedDocumentIds.length > 0,
-          documentIds: selectedDocumentIds
+          documentIds: selectedDocumentIds,
+          useMemory: memoriesAvailable && memoryUseEnabled
         }),
         signal: abortRef.current.signal
       });
@@ -957,6 +1195,16 @@ export default function App() {
             </div>
           </div>
           <div className="topbar-actions">
+            {memoriesAvailable ? (
+              <button
+                className={`memory-button${memoryUseEnabled && memories.length ? " active" : ""}`}
+                type="button"
+                onClick={() => openMemoryWithDraft()}
+              >
+                <span aria-hidden="true">✦</span>
+                메모리 {memories.length}
+              </button>
+            ) : null}
             <button
               className={`knowledge-button${knowledgeEnabled && documents.length ? " active" : ""}`}
               type="button"
@@ -1041,6 +1289,11 @@ export default function App() {
                     index === activeChat.messages.length - 1 &&
                     message.role === "assistant"
                   }
+                  onRemember={
+                    memoriesAvailable
+                      ? (content) => openMemoryWithDraft(content, "context")
+                      : null
+                  }
                 />
               ))}
             </div>
@@ -1074,19 +1327,34 @@ export default function App() {
               }}
             />
             <div className="composer-bottom">
-              {knowledgeEnabled && selectedDocumentIds.length ? (
-                <button
-                  className="knowledge-chip"
-                  type="button"
-                  onClick={() => setKnowledgeOpen(true)}
-                >
-                  ⌁ 문서 {selectedDocumentIds.length}개 검색
-                </button>
-              ) : (
+              <div className="context-chips">
+                {memoriesAvailable && memoryUseEnabled && memories.length ? (
+                  <button
+                    className="memory-chip"
+                    type="button"
+                    onClick={() => openMemoryWithDraft()}
+                  >
+                    ✦ 메모리 {memories.length}
+                  </button>
+                ) : null}
+                {knowledgeEnabled && selectedDocumentIds.length ? (
+                  <button
+                    className="knowledge-chip"
+                    type="button"
+                    onClick={() => setKnowledgeOpen(true)}
+                  >
+                    ⌁ 문서 {selectedDocumentIds.length}개 검색
+                  </button>
+                ) : null}
+              </div>
+              {!(
+                (memoriesAvailable && memoryUseEnabled && memories.length) ||
+                (knowledgeEnabled && selectedDocumentIds.length)
+              ) ? (
                 <span className="composer-hint">
                   <kbd>Enter</kbd> 전송 · <kbd>Shift Enter</kbd> 줄바꿈
                 </span>
-              )}
+              ) : null}
               <button
                 className="send-button"
                 type="submit"
@@ -1134,6 +1402,41 @@ export default function App() {
         }
         onUpload={uploadDocument}
         onDelete={deleteDocument}
+      />
+      <MemoryDrawer
+        open={memoryOpen}
+        memories={memories}
+        enabled={memoryUseEnabled}
+        draft={memoryDraft}
+        type={memoryType}
+        editingId={editingMemoryId}
+        saving={memorySaving}
+        error={memoryError}
+        onClose={() => setMemoryOpen(false)}
+        onToggleEnabled={() => {
+          if (activeChat) {
+            updateChat(activeChat.id, (chat) => ({
+              ...chat,
+              useMemory: chat.useMemory === false
+            }));
+          } else {
+            setMemoryEnabled((enabled) => !enabled);
+          }
+        }}
+        onDraftChange={setMemoryDraft}
+        onTypeChange={setMemoryType}
+        onSubmit={saveMemory}
+        onEdit={(memory) => {
+          setEditingMemoryId(memory.id);
+          setMemoryDraft(memory.content);
+          setMemoryType(memory.type);
+          setMemoryError("");
+        }}
+        onCancelEdit={resetMemoryForm}
+        onDelete={deleteMemory}
+        onClear={() => {
+          if (window.confirm("저장된 모든 메모리를 삭제할까요?")) clearMemories();
+        }}
       />
     </div>
   );

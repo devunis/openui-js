@@ -27,6 +27,7 @@ from starlette.concurrency import run_in_threadpool
 load_dotenv()
 
 from backend import database
+from backend.memory import build_memory_message
 from backend.rag import (
     MAX_FILE_BYTES,
     DocumentError,
@@ -60,6 +61,15 @@ class Settings:
             "true",
             "yes",
         }
+        self.enable_memories = os.getenv("ENABLE_MEMORIES", "true").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        self.memory_user_char_limit = int(os.getenv("MEMORY_USER_CHAR_LIMIT", "2000"))
+        self.memory_context_char_limit = int(
+            os.getenv("MEMORY_CONTEXT_CHAR_LIMIT", "2000")
+        )
 
 
 class Message(BaseModel):
@@ -77,6 +87,7 @@ class ChatRequest(BaseModel):
     temperature: float = Field(default=0.7, ge=0, le=2)
     documentIds: list[str] = Field(default_factory=list, max_length=50)
     useKnowledge: bool = False
+    useMemory: bool = True
 
 
 class Credentials(BaseModel):
@@ -107,6 +118,7 @@ class StoredChat(BaseModel):
     id: str = Field(min_length=1, max_length=100)
     title: str = Field(min_length=1, max_length=200)
     model: str = Field(min_length=1, max_length=200)
+    useMemory: bool = True
     createdAt: int = Field(ge=0)
     updatedAt: int = Field(ge=0)
     messages: list[StoredMessage] = Field(max_length=1000)
@@ -120,6 +132,39 @@ class RagSearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=10_000)
     documentIds: list[str] = Field(default_factory=list, max_length=50)
     limit: int = Field(default=5, ge=1, le=10)
+
+
+class MemoryCreateRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=4_000)
+    type: Literal["user", "context"] = "user"
+    sourceChatId: Optional[str] = Field(default=None, max_length=100)
+
+    @field_validator("content")
+    @classmethod
+    def clean_content(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("Memory content cannot be empty.")
+        return cleaned
+
+
+class MemoryUpdateRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=4_000)
+    type: Literal["user", "context"] = "user"
+
+    @field_validator("content")
+    @classmethod
+    def clean_content(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("Memory content cannot be empty.")
+        return cleaned
+
+
+class MemorySearchRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=10_000)
+    type: Optional[Literal["user", "context"]] = None
+    limit: int = Field(default=5, ge=1, le=20)
 
 
 settings = Settings()
@@ -217,6 +262,7 @@ async def config() -> dict[str, object]:
         "hasApiKey": bool(settings.api_key),
         "authRequired": settings.require_auth,
         "registrationAllowed": settings.allow_registration,
+        "memoriesEnabled": settings.enable_memories,
     }
 
 
@@ -359,6 +405,85 @@ async def search_knowledge(
     return {"results": results}
 
 
+def require_memories_enabled() -> None:
+    if not settings.enable_memories:
+        raise HTTPException(status_code=404, detail="Memory feature is disabled.")
+
+
+@app.get("/api/memories")
+async def get_memories(
+    user: dict[str, object] = Depends(current_user),
+) -> dict[str, object]:
+    require_memories_enabled()
+    return {"memories": database.list_memories(str(user["id"]))}
+
+
+@app.post("/api/memories", status_code=201)
+async def add_memory(
+    payload: MemoryCreateRequest,
+    user: dict[str, object] = Depends(current_user),
+) -> dict[str, object]:
+    require_memories_enabled()
+    memory = database.create_memory(
+        str(user["id"]),
+        payload.type,
+        payload.content,
+        payload.sourceChatId,
+    )
+    return {"memory": memory}
+
+
+@app.put("/api/memories/{memory_id}")
+async def edit_memory(
+    memory_id: str,
+    payload: MemoryUpdateRequest,
+    user: dict[str, object] = Depends(current_user),
+) -> dict[str, object]:
+    require_memories_enabled()
+    memory = database.update_memory(
+        str(user["id"]),
+        memory_id,
+        payload.type,
+        payload.content,
+    )
+    if not memory:
+        raise HTTPException(status_code=404, detail="Memory not found.")
+    return {"memory": memory}
+
+
+@app.delete("/api/memories/{memory_id}", status_code=204)
+async def remove_memory(
+    memory_id: str,
+    user: dict[str, object] = Depends(current_user),
+) -> None:
+    require_memories_enabled()
+    if not database.delete_memory(str(user["id"]), memory_id):
+        raise HTTPException(status_code=404, detail="Memory not found.")
+
+
+@app.delete("/api/memories", status_code=204)
+async def remove_all_memories(
+    user: dict[str, object] = Depends(current_user),
+) -> None:
+    require_memories_enabled()
+    database.clear_memories(str(user["id"]))
+
+
+@app.post("/api/memories/search")
+async def search_memory_bank(
+    payload: MemorySearchRequest,
+    user: dict[str, object] = Depends(current_user),
+) -> dict[str, object]:
+    require_memories_enabled()
+    memories = database.search_memories(
+        str(user["id"]),
+        payload.query,
+        payload.type,
+        payload.limit,
+    )
+    return {"memories": memories}
+
+
 @app.get("/api/models")
 async def models(_user: Optional[dict[str, object]] = Depends(model_access)) -> Response:
     try:
@@ -385,15 +510,36 @@ async def chat_completions(
     _user: Optional[dict[str, object]] = Depends(model_access),
 ) -> Response:
     messages = [message.model_dump() for message in payload.messages]
-    if payload.useKnowledge and _user:
-        user_message = next(
-            (
-                message.content
-                for message in reversed(payload.messages)
-                if message.role == "user"
-            ),
-            "",
+    user_message = next(
+        (
+            message.content
+            for message in reversed(payload.messages)
+            if message.role == "user"
+        ),
+        "",
+    )
+    if payload.useMemory and settings.enable_memories and _user:
+        user_memories = database.memories_for_prompt(
+            str(_user["id"]),
+            "user",
+            settings.memory_user_char_limit,
         )
+        context_memories = database.search_memories(
+            str(_user["id"]),
+            user_message,
+            "context",
+            5,
+            settings.memory_context_char_limit,
+        )
+        if user_memories or context_memories:
+            messages.insert(
+                0,
+                {
+                    "role": "system",
+                    "content": build_memory_message(user_memories, context_memories),
+                },
+            )
+    if payload.useKnowledge and _user:
         results = database.search_document_chunks(
             str(_user["id"]),
             user_message,

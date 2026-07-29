@@ -12,6 +12,42 @@ from typing import Any, Iterator
 
 ROOT = Path(__file__).resolve().parents[1]
 DATABASE_PATH = Path(os.getenv("DATABASE_PATH", ROOT / "data" / "openui.db"))
+MEMORY_SEARCH_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "about",
+    "did",
+    "do",
+    "does",
+    "for",
+    "from",
+    "how",
+    "is",
+    "of",
+    "on",
+    "or",
+    "the",
+    "that",
+    "this",
+    "to",
+    "was",
+    "were",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "why",
+    "with",
+    "그리고",
+    "무엇",
+    "뭐야",
+    "어디",
+    "언제",
+    "어떻게",
+}
 
 
 @contextmanager
@@ -61,6 +97,7 @@ def init_db() -> None:
                 user_id TEXT NOT NULL,
                 title TEXT NOT NULL,
                 model TEXT NOT NULL,
+                use_memory INTEGER NOT NULL DEFAULT 1,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -109,8 +146,33 @@ def init_db() -> None:
 
             CREATE VIRTUAL TABLE IF NOT EXISTS document_chunks_fts
             USING fts5(chunk_id UNINDEXED, content, tokenize='unicode61');
+
+            CREATE TABLE IF NOT EXISTS memories (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                type TEXT NOT NULL CHECK (type IN ('user', 'context')),
+                content TEXT NOT NULL,
+                source_chat_id TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS memories_user_updated_idx
+            ON memories(user_id, updated_at DESC);
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts
+            USING fts5(memory_id UNINDEXED, content, tokenize='unicode61');
             """
         )
+        chat_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(chats)").fetchall()
+        }
+        if "use_memory" not in chat_columns:
+            connection.execute(
+                "ALTER TABLE chats ADD COLUMN use_memory INTEGER NOT NULL DEFAULT 1"
+            )
 
 
 def create_user(email: str, password_hash: str) -> dict[str, Any]:
@@ -187,6 +249,7 @@ def _chat_from_row(connection: sqlite3.Connection, row: sqlite3.Row) -> dict[str
         "id": row["id"],
         "title": row["title"],
         "model": row["model"],
+        "useMemory": bool(row["use_memory"]),
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
         "messages": [
@@ -205,7 +268,7 @@ def list_chats(user_id: str) -> list[dict[str, Any]]:
     with connect() as connection:
         rows = connection.execute(
             """
-            SELECT id, title, model, created_at, updated_at
+            SELECT id, title, model, use_memory, created_at, updated_at
             FROM chats
             WHERE user_id = ?
             ORDER BY updated_at DESC
@@ -226,11 +289,16 @@ def upsert_chat(user_id: str, chat: dict[str, Any]) -> None:
 
         connection.execute(
             """
-            INSERT INTO chats (id, user_id, title, model, created_at, updated_at)
-            VALUES (:id, :user_id, :title, :model, :created_at, :updated_at)
+            INSERT INTO chats (
+                id, user_id, title, model, use_memory, created_at, updated_at
+            )
+            VALUES (
+                :id, :user_id, :title, :model, :use_memory, :created_at, :updated_at
+            )
             ON CONFLICT(id) DO UPDATE SET
                 title = excluded.title,
                 model = excluded.model,
+                use_memory = excluded.use_memory,
                 updated_at = excluded.updated_at
             """,
             {
@@ -238,6 +306,7 @@ def upsert_chat(user_id: str, chat: dict[str, Any]) -> None:
                 "user_id": user_id,
                 "title": chat["title"],
                 "model": chat["model"],
+                "use_memory": int(chat["useMemory"]),
                 "created_at": chat["createdAt"],
                 "updated_at": chat["updatedAt"],
             },
@@ -428,3 +497,222 @@ def search_document_chunks(
         }
         for row in rows
     ]
+
+
+def _memory_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "type": row["type"],
+        "content": row["content"],
+        "sourceChatId": row["source_chat_id"],
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+
+
+def create_memory(
+    user_id: str,
+    memory_type: str,
+    content: str,
+    source_chat_id: str | None = None,
+) -> dict[str, Any]:
+    memory_id = str(uuid.uuid4())
+    now = int(time.time() * 1000)
+    with connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO memories (
+                id, user_id, type, content, source_chat_id, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (memory_id, user_id, memory_type, content, source_chat_id, now, now),
+        )
+        connection.execute(
+            "INSERT INTO memories_fts (memory_id, content) VALUES (?, ?)",
+            (memory_id, content),
+        )
+    return {
+        "id": memory_id,
+        "type": memory_type,
+        "content": content,
+        "sourceChatId": source_chat_id,
+        "createdAt": now,
+        "updatedAt": now,
+    }
+
+
+def list_memories(user_id: str, memory_type: str | None = None) -> list[dict[str, Any]]:
+    type_filter = " AND type = ?" if memory_type else ""
+    params: list[Any] = [user_id]
+    if memory_type:
+        params.append(memory_type)
+    with connect() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT id, type, content, source_chat_id, created_at, updated_at
+            FROM memories
+            WHERE user_id = ? {type_filter}
+            ORDER BY updated_at DESC
+            """,
+            params,
+        ).fetchall()
+    return [_memory_from_row(row) for row in rows]
+
+
+def update_memory(
+    user_id: str,
+    memory_id: str,
+    memory_type: str,
+    content: str,
+) -> dict[str, Any] | None:
+    now = int(time.time() * 1000)
+    with connect() as connection:
+        row = connection.execute(
+            """
+            SELECT id, source_chat_id, created_at
+            FROM memories
+            WHERE id = ? AND user_id = ?
+            """,
+            (memory_id, user_id),
+        ).fetchone()
+        if not row:
+            return None
+        connection.execute(
+            """
+            UPDATE memories
+            SET type = ?, content = ?, updated_at = ?
+            WHERE id = ? AND user_id = ?
+            """,
+            (memory_type, content, now, memory_id, user_id),
+        )
+        connection.execute(
+            "DELETE FROM memories_fts WHERE memory_id = ?",
+            (memory_id,),
+        )
+        connection.execute(
+            "INSERT INTO memories_fts (memory_id, content) VALUES (?, ?)",
+            (memory_id, content),
+        )
+    return {
+        "id": memory_id,
+        "type": memory_type,
+        "content": content,
+        "sourceChatId": row["source_chat_id"],
+        "createdAt": row["created_at"],
+        "updatedAt": now,
+    }
+
+
+def delete_memory(user_id: str, memory_id: str) -> bool:
+    with connect() as connection:
+        exists = connection.execute(
+            "SELECT 1 FROM memories WHERE id = ? AND user_id = ?",
+            (memory_id, user_id),
+        ).fetchone()
+        if not exists:
+            return False
+        connection.execute(
+            "DELETE FROM memories_fts WHERE memory_id = ?",
+            (memory_id,),
+        )
+        connection.execute(
+            "DELETE FROM memories WHERE id = ? AND user_id = ?",
+            (memory_id, user_id),
+        )
+    return True
+
+
+def clear_memories(user_id: str) -> int:
+    with connect() as connection:
+        rows = connection.execute(
+            "SELECT id FROM memories WHERE user_id = ?",
+            (user_id,),
+        ).fetchall()
+        connection.executemany(
+            "DELETE FROM memories_fts WHERE memory_id = ?",
+            [(row["id"],) for row in rows],
+        )
+        connection.execute("DELETE FROM memories WHERE user_id = ?", (user_id,))
+    return len(rows)
+
+
+def memories_for_prompt(
+    user_id: str,
+    memory_type: str,
+    character_limit: int,
+) -> list[dict[str, Any]]:
+    memories = list_memories(user_id, memory_type)
+    selected: list[dict[str, Any]] = []
+    used = 0
+    for memory in memories:
+        remaining = character_limit - used
+        if remaining <= 0:
+            break
+        content = str(memory["content"])
+        if len(content) > remaining:
+            content = content[:remaining].rstrip()
+        if content:
+            selected.append({**memory, "content": content})
+            used += len(content)
+    return selected
+
+
+def search_memories(
+    user_id: str,
+    query: str,
+    memory_type: str | None = None,
+    limit: int = 5,
+    character_limit: int | None = None,
+) -> list[dict[str, Any]]:
+    tokens = [
+        token
+        for token in re.findall(r"[^\W_]{2,}", query.lower(), flags=re.UNICODE)
+        if token not in MEMORY_SEARCH_STOPWORDS
+    ][:16]
+    if not tokens:
+        return []
+    match_query = " OR ".join(f'"{token}"' for token in tokens)
+    type_filter = " AND memories.type = ?" if memory_type else ""
+    params: list[Any] = [match_query, user_id]
+    if memory_type:
+        params.append(memory_type)
+    params.append(max(1, min(limit, 20)))
+    with connect() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT
+                memories.id,
+                memories.type,
+                memories.content,
+                memories.source_chat_id,
+                memories.created_at,
+                memories.updated_at,
+                bm25(memories_fts) AS rank
+            FROM memories_fts
+            JOIN memories ON memories.id = memories_fts.memory_id
+            WHERE memories_fts MATCH ?
+                AND memories.user_id = ?
+                {type_filter}
+            ORDER BY rank, memories.updated_at DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+
+    results = [_memory_from_row(row) for row in rows]
+    if character_limit is None:
+        return results
+    selected: list[dict[str, Any]] = []
+    used = 0
+    for memory in results:
+        remaining = character_limit - used
+        if remaining <= 0:
+            break
+        content = str(memory["content"])
+        if len(content) > remaining:
+            content = content[:remaining].rstrip()
+        if content:
+            selected.append({**memory, "content": content})
+            used += len(content)
+    return selected

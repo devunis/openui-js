@@ -1,4 +1,5 @@
 import json
+import sqlite3
 
 import httpx
 import pytest
@@ -16,6 +17,9 @@ def isolated_database(tmp_path, monkeypatch):
     monkeypatch.setattr(main.database, "DATABASE_PATH", tmp_path / "test.db")
     monkeypatch.setattr(main.settings, "require_auth", True)
     monkeypatch.setattr(main.settings, "allow_registration", True)
+    monkeypatch.setattr(main.settings, "enable_memories", True)
+    monkeypatch.setattr(main.settings, "memory_user_char_limit", 2_000)
+    monkeypatch.setattr(main.settings, "memory_context_char_limit", 2_000)
     main.database.init_db()
 
 
@@ -50,6 +54,7 @@ def test_config_does_not_expose_api_key(monkeypatch):
         "hasApiKey": True,
         "authRequired": True,
         "registrationAllowed": True,
+        "memoriesEnabled": True,
     }
     assert "secret-token" not in response.text
 
@@ -173,6 +178,7 @@ def test_chats_are_persisted_and_isolated_by_user():
         "id": "chat-1",
         "title": "Persist me",
         "model": "model-a",
+        "useMemory": False,
         "createdAt": 100,
         "updatedAt": 200,
         "messages": [
@@ -188,6 +194,7 @@ def test_chats_are_persisted_and_isolated_by_user():
 
     assert sync.status_code == 200
     assert sync.json()["chats"][0]["messages"][0]["content"] == "hello"
+    assert sync.json()["chats"][0]["useMemory"] is False
     assert first.get("/api/chats").json()["chats"][0]["id"] == "chat-1"
     assert second.get("/api/chats").json()["chats"] == []
 
@@ -220,6 +227,11 @@ def test_chat_storage_requires_authentication():
     assert client.post(
         "/api/rag/search",
         json={"query": "private"},
+    ).status_code == 401
+    assert client.get("/api/memories").status_code == 401
+    assert client.post(
+        "/api/memories",
+        json={"content": "private preference", "type": "user"},
     ).status_code == 401
 
 
@@ -371,6 +383,173 @@ def test_chunk_text_preserves_content_with_overlap():
 
 def test_clean_filename_removes_paths_and_control_characters():
     assert rag.clean_filename("../folder\\unsafe\nname.txt") == "unsafe name.txt"
+
+
+def test_memory_crud_search_and_clear():
+    client = TestClient(main.app)
+    register_client(client)
+
+    created = client.post(
+        "/api/memories",
+        json={
+            "content": "I prefer concise Korean answers.",
+            "type": "user",
+            "sourceChatId": "chat-1",
+        },
+    )
+    memory = created.json()["memory"]
+    updated = client.put(
+        f"/api/memories/{memory['id']}",
+        json={"content": "I prefer detailed Korean answers.", "type": "context"},
+    )
+    searched = client.post(
+        "/api/memories/search",
+        json={"query": "Korean answers", "type": "context"},
+    )
+
+    assert created.status_code == 201
+    assert memory["sourceChatId"] == "chat-1"
+    assert updated.status_code == 200
+    assert updated.json()["memory"]["content"] == "I prefer detailed Korean answers."
+    assert client.get("/api/memories").json()["memories"][0]["type"] == "context"
+    assert searched.json()["memories"][0]["id"] == memory["id"]
+
+    assert client.delete(f"/api/memories/{memory['id']}").status_code == 204
+    assert client.delete(f"/api/memories/{memory['id']}").status_code == 404
+
+    client.post("/api/memories", json={"content": "memory one", "type": "user"})
+    client.post("/api/memories", json={"content": "memory two", "type": "context"})
+    assert client.delete("/api/memories").status_code == 204
+    assert client.get("/api/memories").json()["memories"] == []
+
+
+def test_memories_are_isolated_by_user():
+    first = TestClient(main.app)
+    second = TestClient(main.app)
+    register_client(first, "first@example.com")
+    register_client(second, "second@example.com")
+    memory = first.post(
+        "/api/memories",
+        json={"content": "First user likes amber.", "type": "user"},
+    ).json()["memory"]
+
+    assert len(first.get("/api/memories").json()["memories"]) == 1
+    assert second.get("/api/memories").json()["memories"] == []
+    assert second.post(
+        "/api/memories/search",
+        json={"query": "amber"},
+    ).json()["memories"] == []
+    assert second.put(
+        f"/api/memories/{memory['id']}",
+        json={"content": "stolen", "type": "user"},
+    ).status_code == 404
+    assert second.delete(f"/api/memories/{memory['id']}").status_code == 404
+
+
+def test_chat_injects_user_and_relevant_context_memories(monkeypatch):
+    async def handler(request):
+        body = json.loads(request.content)
+        assert body["messages"][0]["role"] == "system"
+        memory_context = body["messages"][0]["content"]
+        assert "concise Korean answers" in memory_context
+        assert "Orion release is Friday" in memory_context
+        assert "unrelated vacation" not in memory_context
+        return httpx.Response(
+            200,
+            content=b"data: [DONE]\n\n",
+            headers={"content-type": "text/event-stream"},
+        )
+
+    monkeypatch.setattr(main.settings, "api_base_url", "http://model.test/v1")
+    monkeypatch.setattr(main, "get_http_client", lambda: mock_client(handler))
+    client = TestClient(main.app)
+    register_client(client)
+    client.post(
+        "/api/memories",
+        json={"content": "The user prefers concise Korean answers.", "type": "user"},
+    )
+    client.post(
+        "/api/memories",
+        json={"content": "Project Orion release is Friday.", "type": "context"},
+    )
+    client.post(
+        "/api/memories",
+        json={"content": "An unrelated vacation is in December.", "type": "context"},
+    )
+
+    response = client.post(
+        "/api/chat/completions",
+        json={
+            "model": "model-a",
+            "messages": [{"role": "user", "content": "When is the Orion release?"}],
+            "useMemory": True,
+        },
+    )
+
+    assert response.status_code == 200
+
+
+def test_memory_can_be_disabled_per_request_and_globally(monkeypatch):
+    async def handler(request):
+        body = json.loads(request.content)
+        assert body["messages"] == [{"role": "user", "content": "hello"}]
+        return httpx.Response(
+            200,
+            content=b"data: [DONE]\n\n",
+            headers={"content-type": "text/event-stream"},
+        )
+
+    monkeypatch.setattr(main.settings, "api_base_url", "http://model.test/v1")
+    monkeypatch.setattr(main, "get_http_client", lambda: mock_client(handler))
+    client = TestClient(main.app)
+    register_client(client)
+    client.post(
+        "/api/memories",
+        json={"content": "Always answer in Korean.", "type": "user"},
+    )
+
+    response = client.post(
+        "/api/chat/completions",
+        json={
+            "model": "model-a",
+            "messages": [{"role": "user", "content": "hello"}],
+            "useMemory": False,
+        },
+    )
+    monkeypatch.setattr(main.settings, "enable_memories", False)
+
+    assert response.status_code == 200
+    assert client.get("/api/config").json()["memoriesEnabled"] is False
+    assert client.get("/api/memories").status_code == 404
+
+
+def test_init_db_migrates_legacy_chats_for_memory_toggle(tmp_path, monkeypatch):
+    legacy_path = tmp_path / "legacy.db"
+    connection = sqlite3.connect(legacy_path)
+    connection.execute(
+        """
+        CREATE TABLE chats (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            model TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )
+        """
+    )
+    connection.commit()
+    connection.close()
+    monkeypatch.setattr(main.database, "DATABASE_PATH", legacy_path)
+
+    main.database.init_db()
+
+    with main.database.connect() as migrated:
+        columns = {
+            row["name"]
+            for row in migrated.execute("PRAGMA table_info(chats)").fetchall()
+        }
+    assert "use_memory" in columns
 
 
 def test_built_frontends_are_served():
