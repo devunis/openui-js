@@ -62,6 +62,9 @@
             <div class="model-menu" id="modelMenu" role="listbox"></div>
           </div>
           <div class="topbar-actions">
+            <button class="memory-button" id="memoryButton" type="button">
+              <span aria-hidden="true">✦</span> 메모리 <b id="memoryCount">0</b>
+            </button>
             <button class="knowledge-button" id="knowledgeButton" type="button">
               <span aria-hidden="true">⌁</span> 지식 <b id="knowledgeCount">0</b>
             </button>
@@ -114,9 +117,14 @@
               aria-label="메시지"
             ></textarea>
             <div class="composer-bottom">
-              <button class="knowledge-chip" id="knowledgeChip" type="button" hidden>
-                ⌁ 문서 <span id="selectedKnowledgeCount">0</span>개 검색
-              </button>
+              <div class="context-chips">
+                <button class="memory-chip" id="memoryChip" type="button" hidden>
+                  ✦ 메모리 <span id="composerMemoryCount">0</span>
+                </button>
+                <button class="knowledge-chip" id="knowledgeChip" type="button" hidden>
+                  ⌁ 문서 <span id="selectedKnowledgeCount">0</span>개 검색
+                </button>
+              </div>
               <span class="composer-hint" id="composerHint"><kbd>Enter</kbd> 전송 · <kbd>Shift Enter</kbd> 줄바꿈</span>
               <button class="send-button" id="sendButton" type="submit" aria-label="메시지 보내기">
                 ↑
@@ -151,6 +159,48 @@
       <p class="upload-hint">파일당 최대 10MB · 원본 파일은 저장하지 않음</p>
       <p class="knowledge-error" id="knowledgeError" hidden></p>
       <div class="document-list" id="documentList"></div>
+    </aside>
+
+    <div class="drawer-backdrop" id="memoryBackdrop" hidden></div>
+    <aside class="memory-drawer" id="memoryDrawer" aria-label="개인 메모리" hidden>
+      <div class="drawer-header">
+        <div>
+          <p class="eyebrow">PERSONAL MEMORY</p>
+          <h2>내 메모리</h2>
+        </div>
+        <button class="icon-button" id="memoryClose" type="button" aria-label="닫기">×</button>
+      </div>
+      <p class="drawer-copy">
+        선호와 오래 유지할 맥락을 저장하면 새 대화에서도 필요한 내용을 참고합니다.
+      </p>
+      <label class="knowledge-toggle">
+        <span><strong>채팅에서 메모리 사용</strong><small id="memoryStatus">0개 저장됨</small></span>
+        <input id="memoryEnabled" type="checkbox" checked />
+      </label>
+      <form class="memory-form" id="memoryForm">
+        <textarea
+          id="memoryInput"
+          rows="4"
+          maxlength="4000"
+          required
+          placeholder="예: 답변은 항상 한국어로 해줘"
+          aria-label="메모리 내용"
+        ></textarea>
+        <div class="memory-form-row">
+          <select id="memoryType" aria-label="메모리 종류">
+            <option value="user">내 정보·선호</option>
+            <option value="context">장기 맥락</option>
+          </select>
+          <button class="memory-cancel" id="memoryCancel" type="button" hidden>취소</button>
+          <button class="memory-save" id="memorySave" type="submit">메모리 추가</button>
+        </div>
+      </form>
+      <p class="memory-hint">비밀번호, API 키, 인증 토큰 같은 민감정보는 저장하지 마세요.</p>
+      <p class="knowledge-error" id="memoryError" hidden></p>
+      <div class="memory-list" id="memoryList"></div>
+      <button class="memory-clear" id="memoryClear" type="button" hidden>
+        모든 메모리 삭제
+      </button>
     </aside>
 
     <div class="modal-backdrop" id="authModal" hidden>
@@ -203,7 +253,10 @@
         <div class="message-content">
           <div class="message-meta"><strong></strong><span></span></div>
           <div class="message-body"></div>
-          <div class="message-actions"><button class="copy-button" type="button">복사</button></div>
+          <div class="message-actions">
+            <button class="copy-button" type="button">복사</button>
+            <button class="copy-button remember-button" type="button">기억하기</button>
+          </div>
         </div>
       </article>
     </template>

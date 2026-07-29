@@ -23,6 +23,7 @@ const elements = {
   composer: $("#composer"),
   connectionDetail: $("#connectionDetail"),
   connectionTitle: $("#connectionTitle"),
+  composerMemoryCount: $("#composerMemoryCount"),
   composerHint: $("#composerHint"),
   conversation: $("#conversation"),
   documentList: $("#documentList"),
@@ -40,6 +41,22 @@ const elements = {
   knowledgeSelectionLabel: $("#knowledgeSelectionLabel"),
   messageList: $("#messageList"),
   messageTemplate: $("#messageTemplate"),
+  memoryBackdrop: $("#memoryBackdrop"),
+  memoryButton: $("#memoryButton"),
+  memoryCancel: $("#memoryCancel"),
+  memoryChip: $("#memoryChip"),
+  memoryClear: $("#memoryClear"),
+  memoryClose: $("#memoryClose"),
+  memoryCount: $("#memoryCount"),
+  memoryDrawer: $("#memoryDrawer"),
+  memoryEnabled: $("#memoryEnabled"),
+  memoryError: $("#memoryError"),
+  memoryForm: $("#memoryForm"),
+  memoryInput: $("#memoryInput"),
+  memoryList: $("#memoryList"),
+  memorySave: $("#memorySave"),
+  memoryStatus: $("#memoryStatus"),
+  memoryType: $("#memoryType"),
   modelMenu: $("#modelMenu"),
   modelPicker: $("#modelPicker"),
   modelPickerWrap: $("#modelPickerWrap"),
@@ -74,6 +91,10 @@ const state = {
   selectedDocumentIds: [],
   knowledgeEnabled: true,
   uploading: false,
+  memories: [],
+  memoryEnabled: true,
+  memoriesAvailable: true,
+  editingMemoryId: null,
   syncStatus: "로컬 저장",
   syncTimer: null
 };
@@ -112,6 +133,7 @@ function normalizeChat(chat) {
     ...chat,
     title: chat.title || "새 대화",
     model: chat.model || state.selectedModel || state.defaultModel,
+    useMemory: chat.useMemory !== false,
     createdAt: chat.createdAt || Date.now(),
     updatedAt: chat.updatedAt || chat.createdAt || Date.now(),
     messages: Array.isArray(chat.messages) ? chat.messages : []
@@ -172,6 +194,7 @@ function renderMessage(message, streaming = false) {
   const article = fragment.querySelector(".message");
   const body = fragment.querySelector(".message-body");
   const copy = fragment.querySelector(".copy-button");
+  const remember = fragment.querySelector(".remember-button");
   article.classList.add(message.role);
   fragment.querySelector(".message-meta strong").textContent =
     message.role === "user" ? "나" : "OpenUI JS";
@@ -183,6 +206,9 @@ function renderMessage(message, streaming = false) {
     copy.textContent = "복사됨";
     setTimeout(() => (copy.textContent = "복사"), 1200);
   });
+  remember.disabled = streaming || !message.content;
+  remember.hidden = !state.memoriesAvailable;
+  remember.addEventListener("click", () => openMemory(message.content, "context"));
   elements.messageList.append(fragment);
 }
 
@@ -271,7 +297,177 @@ function render() {
   renderMessages();
   renderAccount();
   renderDocuments();
+  renderMemories();
   updateAccess();
+}
+
+function renderMemories() {
+  const memoryEnabled = activeChat()?.useMemory ?? state.memoryEnabled;
+  elements.memoryList.replaceChildren();
+  elements.memoryCount.textContent = state.memories.length;
+  elements.composerMemoryCount.textContent = state.memories.length;
+  elements.memoryStatus.textContent = `${state.memories.length}개 저장됨`;
+  elements.memoryEnabled.checked = memoryEnabled;
+  elements.memoryButton.hidden = !state.memoriesAvailable;
+  elements.memoryButton.classList.toggle(
+    "active",
+    memoryEnabled && state.memories.length > 0
+  );
+  const memoryActive =
+    state.memoriesAvailable && memoryEnabled && state.memories.length > 0;
+  elements.memoryChip.hidden = !memoryActive;
+  elements.composerHint.hidden =
+    memoryActive || (state.knowledgeEnabled && state.selectedDocumentIds.length > 0);
+  elements.memoryClear.hidden = !state.memories.length;
+
+  if (!state.memories.length) {
+    const empty = document.createElement("div");
+    empty.className = "document-empty";
+    empty.innerHTML =
+      '<span aria-hidden="true">✦</span><strong>아직 기억한 내용이 없어요</strong><small>직접 추가하거나 메시지에서 기억하기를 누르세요.</small>';
+    elements.memoryList.append(empty);
+    return;
+  }
+
+  for (const memory of state.memories) {
+    const item = document.createElement("article");
+    item.className = "memory-item";
+    item.innerHTML =
+      '<div><span class="memory-type"></span><p></p></div><div class="memory-actions"><button type="button">수정</button><button type="button">삭제</button></div>';
+    const badge = item.querySelector(".memory-type");
+    badge.classList.add(memory.type);
+    badge.textContent = memory.type === "user" ? "내 정보" : "맥락";
+    item.querySelector("p").textContent = memory.content;
+    const [edit, remove] = item.querySelectorAll(".memory-actions button");
+    edit.addEventListener("click", () => {
+      state.editingMemoryId = memory.id;
+      elements.memoryInput.value = memory.content;
+      elements.memoryType.value = memory.type;
+      elements.memoryCancel.hidden = false;
+      elements.memorySave.textContent = "수정 저장";
+      elements.memoryInput.focus();
+    });
+    remove.addEventListener("click", () => deleteMemory(memory.id));
+    elements.memoryList.append(item);
+  }
+}
+
+async function loadMemories() {
+  if (!state.user || !state.memoriesAvailable) {
+    state.memories = [];
+    renderMemories();
+    return;
+  }
+  try {
+    const response = await fetch("/api/memories");
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.detail || "메모리를 불러오지 못했습니다.");
+    state.memories = payload.memories;
+    elements.memoryError.hidden = true;
+  } catch (error) {
+    elements.memoryError.textContent = error.message;
+    elements.memoryError.hidden = false;
+  }
+  renderMemories();
+}
+
+function resetMemoryForm() {
+  state.editingMemoryId = null;
+  elements.memoryInput.value = "";
+  elements.memoryType.value = "user";
+  elements.memoryCancel.hidden = true;
+  elements.memorySave.textContent = "메모리 추가";
+}
+
+function openMemory(content = "", type = "user") {
+  if (!state.user) {
+    openAuth();
+    return;
+  }
+  closeKnowledge();
+  resetMemoryForm();
+  elements.memoryInput.value = content.slice(0, 4000);
+  elements.memoryType.value = type;
+  elements.memoryError.hidden = true;
+  elements.memoryDrawer.hidden = false;
+  elements.memoryBackdrop.hidden = false;
+  requestAnimationFrame(() => elements.memoryInput.focus());
+}
+
+function closeMemory() {
+  elements.memoryDrawer.hidden = true;
+  elements.memoryBackdrop.hidden = true;
+}
+
+async function saveMemory() {
+  const content = elements.memoryInput.value.trim();
+  if (!content) return;
+  elements.memorySave.disabled = true;
+  elements.memorySave.textContent = "저장 중…";
+  elements.memoryError.hidden = true;
+  try {
+    const editing = Boolean(state.editingMemoryId);
+    const response = await fetch(
+      editing
+        ? `/api/memories/${encodeURIComponent(state.editingMemoryId)}`
+        : "/api/memories",
+      {
+        method: editing ? "PUT" : "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          content,
+          type: elements.memoryType.value,
+          ...(editing ? {} : { sourceChatId: state.activeChatId })
+        })
+      }
+    );
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.detail || "메모리를 저장하지 못했습니다.");
+    state.memories = editing
+      ? state.memories.map((memory) =>
+          memory.id === payload.memory.id ? payload.memory : memory
+        )
+      : [payload.memory, ...state.memories];
+    resetMemoryForm();
+    renderMemories();
+  } catch (error) {
+    elements.memoryError.textContent = error.message;
+    elements.memoryError.hidden = false;
+  } finally {
+    elements.memorySave.disabled = false;
+    elements.memorySave.textContent =
+      state.editingMemoryId ? "수정 저장" : "메모리 추가";
+  }
+}
+
+async function deleteMemory(memoryId) {
+  elements.memoryError.hidden = true;
+  try {
+    const response = await fetch(`/api/memories/${encodeURIComponent(memoryId)}`, {
+      method: "DELETE"
+    });
+    if (!response.ok) throw new Error("메모리를 삭제하지 못했습니다.");
+    state.memories = state.memories.filter((memory) => memory.id !== memoryId);
+    if (state.editingMemoryId === memoryId) resetMemoryForm();
+    renderMemories();
+  } catch (error) {
+    elements.memoryError.textContent = error.message;
+    elements.memoryError.hidden = false;
+  }
+}
+
+async function clearMemories() {
+  elements.memoryError.hidden = true;
+  try {
+    const response = await fetch("/api/memories", { method: "DELETE" });
+    if (!response.ok) throw new Error("메모리를 초기화하지 못했습니다.");
+    state.memories = [];
+    resetMemoryForm();
+    renderMemories();
+  } catch (error) {
+    elements.memoryError.textContent = error.message;
+    elements.memoryError.hidden = false;
+  }
 }
 
 function renderDocuments() {
@@ -288,6 +484,11 @@ function renderDocuments() {
     state.knowledgeEnabled && state.selectedDocumentIds.length > 0;
   elements.knowledgeChip.hidden = !knowledgeActive;
   elements.composerHint.hidden = knowledgeActive;
+  elements.composerHint.hidden =
+    knowledgeActive ||
+    (state.memoriesAvailable &&
+      (activeChat()?.useMemory ?? state.memoryEnabled) &&
+      state.memories.length > 0);
   elements.knowledgeEnabled.checked = state.knowledgeEnabled;
 
   if (!state.documents.length) {
@@ -348,6 +549,7 @@ function openKnowledge() {
     openAuth();
     return;
   }
+  closeMemory();
   elements.knowledgeDrawer.hidden = false;
   elements.knowledgeBackdrop.hidden = false;
 }
@@ -412,6 +614,7 @@ function newChat() {
     id: makeId(),
     title: "새 대화",
     model: state.selectedModel || state.defaultModel,
+    useMemory: state.memoryEnabled,
     createdAt: now,
     updatedAt: now,
     messages: []
@@ -513,6 +716,7 @@ async function authenticate() {
     }
     state.user = payload.user;
     await loadDocuments();
+    await loadMemories();
     state.syncStatus = "동기화 중";
     try {
       const sync = await fetch("/api/chats/sync", {
@@ -553,6 +757,8 @@ async function logout() {
   state.activeChatId = null;
   state.documents = [];
   state.selectedDocumentIds = [];
+  state.memories = [];
+  closeMemory();
   closeKnowledge();
   state.syncStatus = "로컬 저장";
   save();
@@ -571,6 +777,7 @@ async function restoreSession() {
     const payload = await response.json();
     state.user = payload.user;
     await loadDocuments();
+    await loadMemories();
     state.syncStatus = "동기화 중";
     renderAccount();
     try {
@@ -653,7 +860,8 @@ async function sendMessage(content) {
         messages: requestMessages.map(({ role, content: text }) => ({ role, content: text })),
         temperature: 0.7,
         useKnowledge: state.knowledgeEnabled && state.selectedDocumentIds.length > 0,
-        documentIds: state.selectedDocumentIds
+        documentIds: state.selectedDocumentIds,
+        useMemory: state.memoriesAvailable && chat.useMemory !== false
       }),
       signal: state.controller.signal
     });
@@ -710,6 +918,9 @@ async function loadModels() {
     state.defaultModel = config.defaultModel;
     state.authRequired = config.authRequired !== false;
     state.registrationAllowed = config.registrationAllowed !== false;
+    state.memoriesAvailable = config.memoriesEnabled !== false;
+    renderMessages();
+    renderMemories();
     elements.connectionDetail.textContent = new URL(config.apiBaseUrl).host;
     if (state.authRequired && !state.user) {
       state.selectedModel ||= state.defaultModel;
@@ -809,6 +1020,29 @@ elements.knowledgeEnabled.addEventListener("change", () => {
   renderDocuments();
 });
 elements.documentUpload.addEventListener("change", uploadDocument);
+elements.memoryButton.addEventListener("click", () => openMemory());
+elements.memoryChip.addEventListener("click", () => openMemory());
+elements.memoryClose.addEventListener("click", closeMemory);
+elements.memoryBackdrop.addEventListener("click", closeMemory);
+elements.memoryEnabled.addEventListener("change", () => {
+  const chat = activeChat();
+  if (chat) {
+    chat.useMemory = elements.memoryEnabled.checked;
+    chat.updatedAt = Date.now();
+    scheduleSync();
+  } else {
+    state.memoryEnabled = elements.memoryEnabled.checked;
+  }
+  renderMemories();
+});
+elements.memoryCancel.addEventListener("click", resetMemoryForm);
+elements.memoryClear.addEventListener("click", () => {
+  if (window.confirm("저장된 모든 메모리를 삭제할까요?")) clearMemories();
+});
+elements.memoryForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  saveMemory();
+});
 elements.authForm.addEventListener("submit", (event) => {
   event.preventDefault();
   authenticate();
@@ -833,6 +1067,7 @@ document.addEventListener("keydown", (event) => {
     closeSidebar();
     closeAuth();
     closeKnowledge();
+    closeMemory();
   }
 });
 document.querySelectorAll(".suggestion").forEach((button) =>
