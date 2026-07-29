@@ -1,0 +1,16 @@
+{
+  "name": "@openui-js/react",
+  "version": "1.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "peerDependencies": {
+    "react": ">=18"
+  },
+  "sideEffects": false,
+  "license": "MIT"
+}

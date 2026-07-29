@@ -103,6 +103,17 @@ class Settings:
             "true",
             "yes",
         }
+        self.cors_origins = [
+            origin.strip()
+            for origin in os.getenv(
+                "CORS_ORIGINS",
+                (
+                    "http://127.0.0.1:3000,http://localhost:3000,"
+                    "http://127.0.0.1:3001,http://localhost:3001"
+                ),
+            ).split(",")
+            if origin.strip()
+        ]
 
 
 MAX_IMAGE_BYTES = 2 * 1024 * 1024
@@ -286,12 +297,7 @@ app = FastAPI(
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://127.0.0.1:3000",
-        "http://localhost:3000",
-        "http://127.0.0.1:3001",
-        "http://localhost:3001",
-    ],
+    allow_origins=settings.cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["Content-Type"],
