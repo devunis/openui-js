@@ -20,6 +20,7 @@ Svelte 없이 **React와 바닐라 JavaScript 두 가지 프런트엔드**를 �
 - 대화 본문 검색, 보관함, Markdown/JSON 내보내기
 - 여러 OpenAI 호환 공급자와 모델을 대화별로 선택
 - 안전한 계산기·현재 시각 함수 도구와 허용 목록 기반 원격 MCP 도구
+- headless JavaScript 클라이언트, React 훅, `<openui-chat>` 웹 컴포넌트
 - OpenAI 호환 `/v1` API 지원
 - Ollama의 OpenAI 호환 API 지원
 - 실시간 스트리밍 응답
@@ -82,6 +83,7 @@ OpenAI 호환 규격을 제공하는 로컬 서버나 다른 서비스도 `API_B
 | `DATABASE_PATH` | `data/openui.db` | SQLite 데이터베이스 경로 |
 | `SESSION_TTL_DAYS` | `30` | 로그인 유지 기간 |
 | `COOKIE_SECURE` | `false` | HTTPS 배포 시 `true` |
+| `CORS_ORIGINS` | 로컬 React·Vanilla 주소 | 쉼표로 구분한 허용 웹 출처 |
 | `REQUIRE_AUTH` | `true` | 모델·채팅 API에 로그인 요구 |
 | `ALLOW_REGISTRATION` | `true` | 새 계정 가입 허용 |
 | `ENABLE_MEMORIES` | `true` | 사용자 메모리 기능 활성화 |
@@ -105,6 +107,7 @@ npm run dev:vanilla
 npm run backend
 npm run build
 npm test
+npm run test:sdk
 npm run check
 ```
 
@@ -156,6 +159,67 @@ MCP_SERVERS_JSON=[{"id":"docs","name":"Docs MCP","url":"https://mcp.example.com/
 
 OpenUI JS는 MCP 세션 초기화 후 `tools/list`와 `tools/call`을 사용합니다. 도구 허용 목록은 관리자의 자동 실행 승인으로 취급되므로, 쓰기·삭제·결제처럼 부작용이 있는 도구는 넣지 않는 것을 권장합니다.
 
+## JavaScript SDK와 임베드
+
+`packages/`에는 앱 UI와 독립적으로 사용할 수 있는 세 가지 ESM 패키지가 있습니다.
+
+### Headless JavaScript
+
+```js
+import { OpenUIClient } from "@openui-js/core";
+
+const client = new OpenUIClient({ baseUrl: "https://chat.example.com" });
+let answer = "";
+
+for await (const delta of client.streamChat({
+  model: "gpt-4.1-mini",
+  providerId: "default",
+  messages: [{ role: "user", content: "안녕!" }]
+})) {
+  answer += delta;
+}
+```
+
+클라이언트는 설정·모델·도구·인증·대화 저장 API와 SSE 스트리밍을 제공하며, 웹 출처와 도구 실행 기록은 `onSources`, `onTools` 콜백으로 받을 수 있습니다.
+
+### React
+
+```jsx
+import { OpenUIProvider, useOpenUIChat } from "@openui-js/react";
+
+function Chat() {
+  const { messages, send, streaming } = useOpenUIChat({
+    model: "gpt-4.1-mini"
+  });
+  // 원하는 디자인 시스템으로 messages를 렌더링
+}
+
+export default () => (
+  <OpenUIProvider options={{ baseUrl: "https://chat.example.com" }}>
+    <Chat />
+  </OpenUIProvider>
+);
+```
+
+### 웹 컴포넌트
+
+```html
+<script type="module">
+  import "@openui-js/web-component";
+</script>
+
+<openui-chat
+  base-url="https://chat.example.com"
+  model="gpt-4.1-mini"
+  provider-id="default"
+  use-web
+></openui-chat>
+```
+
+웹 컴포넌트는 Shadow DOM 안에서 렌더링되며 `openui-message`, `openui-sources`, `openui-tools`, `openui-error` 이벤트를 발생시킵니다. 프로덕션 번들은 `npm run build:sdk`, 스트림 파서 테스트는 `npm run test:sdk`로 실행합니다.
+
+다른 도메인에 임베드할 때는 그 정확한 출처를 서버의 `CORS_ORIGINS`에 추가하고 HTTPS 환경에서 `COOKIE_SECURE=true`를 사용하세요. 쿠키 인증을 쓰므로 와일드카드 출처는 권장하지 않습니다.
+
 ## 구조
 
 ```text
@@ -174,6 +238,10 @@ OpenUI JS는 MCP 세션 초기화 후 `tools/list`와 `tools/call`을 사용합�
 │   ├── react/          # React 구현
 │   ├── vanilla/        # 순수 HTML/JavaScript 구현
 │   └── shared/         # 두 UI가 공유하는 스타일
+├── packages/
+│   ├── core/           # headless JavaScript API 클라이언트
+│   ├── react/          # React Provider와 채팅 훅
+│   └── web-component/  # 임베드용 <openui-chat>
 ├── vite.react.config.js
 └── vite.vanilla.config.js
 ```

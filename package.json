@@ -4,18 +4,23 @@
   "description": "React and vanilla JavaScript chat UIs with a shared FastAPI backend.",
   "type": "module",
   "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
     "dev": "npm run dev:react",
     "dev:react": "vite --config vite.react.config.js",
     "dev:vanilla": "vite --config vite.vanilla.config.js",
-    "build": "npm run build:react && npm run build:vanilla",
+    "build": "npm run build:react && npm run build:vanilla && npm run build:sdk",
     "build:react": "vite build --config vite.react.config.js",
     "build:vanilla": "vite build --config vite.vanilla.config.js",
+    "build:sdk": "vite build --config vite.core.config.js && vite build --config vite.react-lib.config.js && vite build --config vite.web-component.config.js",
     "preview:react": "vite preview --config vite.react.config.js",
     "preview:vanilla": "vite preview --config vite.vanilla.config.js",
     "check": "npm run build",
     "backend": "python -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000",
-    "test": "python -m pytest backend"
+    "test": "python -m pytest backend && npm run test:sdk",
+    "test:sdk": "node --test packages/core/test/*.test.js"
   },
   "engines": {
     "node": ">=20"
