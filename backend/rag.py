@@ -21,6 +21,8 @@ class DocumentError(ValueError):
 
 def clean_filename(filename: str | None) -> str:
     name = Path((filename or "document").replace("\\", "/")).name.strip()
+    name = re.sub(r"[\x00-\x1f\x7f]+", " ", name)
+    name = re.sub(r"\s+", " ", name).strip()
     return (name or "document")[:255]
 
 

@@ -179,6 +179,8 @@ def model_access(
     session_token: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE),
 ) -> Optional[dict[str, object]]:
     if not settings.require_auth:
+        if session_token:
+            return database.get_user_by_session(hash_session_token(session_token))
         return None
     return current_user(session_token)
 

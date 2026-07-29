@@ -325,6 +325,41 @@ def test_chat_injects_retrieved_context_as_untrusted_system_message(monkeypatch)
     assert "amber zebra" in response.text
 
 
+def test_rag_keeps_signed_in_user_when_auth_is_optional(monkeypatch):
+    async def handler(request):
+        body = json.loads(request.content)
+        assert body["messages"][0]["role"] == "system"
+        assert "optional-auth.txt" in body["messages"][0]["content"]
+        return httpx.Response(
+            200,
+            content=b"data: [DONE]\n\n",
+            headers={"content-type": "text/event-stream"},
+        )
+
+    monkeypatch.setattr(main.settings, "api_base_url", "http://model.test/v1")
+    monkeypatch.setattr(main, "get_http_client", lambda: mock_client(handler))
+    client = TestClient(main.app)
+    register_client(client)
+    document = upload_text(
+        client,
+        "optional-auth.txt",
+        "The optional authentication launch code is cedar moon.",
+    )
+    monkeypatch.setattr(main.settings, "require_auth", False)
+
+    response = client.post(
+        "/api/chat/completions",
+        json={
+            "model": "model-a",
+            "messages": [{"role": "user", "content": "What is the launch code?"}],
+            "useKnowledge": True,
+            "documentIds": [document["id"]],
+        },
+    )
+
+    assert response.status_code == 200
+
+
 def test_chunk_text_preserves_content_with_overlap():
     text = "alpha " * 500
     chunks = rag.chunk_text(text)
@@ -332,6 +367,10 @@ def test_chunk_text_preserves_content_with_overlap():
     assert len(chunks) > 1
     assert all(len(chunk) <= rag.CHUNK_SIZE for chunk in chunks)
     assert chunks[0][-80:] in chunks[1]
+
+
+def test_clean_filename_removes_paths_and_control_characters():
+    assert rag.clean_filename("../folder\\unsafe\nname.txt") == "unsafe name.txt"
 
 
 def test_built_frontends_are_served():
