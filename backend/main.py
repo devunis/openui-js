@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 import os
 import re
 import sqlite3
 import time
 from pathlib import Path
 from typing import Literal, Optional
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import (
@@ -21,7 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.concurrency import run_in_threadpool
 
 load_dotenv()
@@ -42,6 +46,12 @@ from backend.security import (
     hash_password,
     hash_session_token,
     verify_password,
+)
+from backend.web_search import (
+    WebSearchError,
+    build_web_message,
+    fetch_public_url,
+    search_web,
 )
 
 
@@ -70,6 +80,55 @@ class Settings:
         self.memory_context_char_limit = int(
             os.getenv("MEMORY_CONTEXT_CHAR_LIMIT", "2000")
         )
+        self.enable_web_search = os.getenv("ENABLE_WEB_SEARCH", "false").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        self.web_search_provider = os.getenv("WEB_SEARCH_PROVIDER", "external").lower()
+        self.web_search_url = os.getenv("WEB_SEARCH_URL", "")
+        self.web_search_api_key = os.getenv("WEB_SEARCH_API_KEY", "")
+        self.web_search_result_count = int(os.getenv("WEB_SEARCH_RESULT_COUNT", "5"))
+
+
+MAX_IMAGE_BYTES = 2 * 1024 * 1024
+
+
+class WebSource(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    title: str = Field(min_length=1, max_length=300)
+    url: str = Field(min_length=1, max_length=2_000)
+    snippet: str = Field(default="", max_length=2_000)
+
+    @field_validator("url")
+    @classmethod
+    def public_http_url(cls, value: str) -> str:
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("웹 출처는 HTTP 또는 HTTPS URL이어야 합니다.")
+        return value
+
+
+class ImageAttachment(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    name: str = Field(min_length=1, max_length=255)
+    contentType: Literal["image/png", "image/jpeg", "image/webp", "image/gif"]
+    dataUrl: str = Field(min_length=1, max_length=3_000_000)
+
+    @model_validator(mode="after")
+    def valid_data_url(self) -> "ImageAttachment":
+        prefix = f"data:{self.contentType};base64,"
+        if not self.dataUrl.startswith(prefix):
+            raise ValueError("이미지 데이터 형식과 MIME 유형이 일치하지 않습니다.")
+        try:
+            decoded = base64.b64decode(self.dataUrl[len(prefix) :], validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise ValueError("유효하지 않은 base64 이미지입니다.") from exc
+        if len(decoded) > MAX_IMAGE_BYTES:
+            raise ValueError("이미지는 파일당 최대 2MB까지 첨부할 수 있습니다.")
+        return self
 
 
 class Message(BaseModel):
@@ -77,6 +136,7 @@ class Message(BaseModel):
 
     role: Literal["system", "user", "assistant"]
     content: str = Field(max_length=100_000)
+    attachments: list[ImageAttachment] = Field(default_factory=list, max_length=3)
 
 
 class ChatRequest(BaseModel):
@@ -88,6 +148,18 @@ class ChatRequest(BaseModel):
     documentIds: list[str] = Field(default_factory=list, max_length=50)
     useKnowledge: bool = False
     useMemory: bool = True
+    useWeb: bool = False
+
+    @model_validator(mode="after")
+    def attachment_budget(self) -> "ChatRequest":
+        attachments = [
+            attachment
+            for message in self.messages
+            for attachment in message.attachments
+        ]
+        if len(attachments) > 12:
+            raise ValueError("한 요청에는 이미지를 최대 12개까지 포함할 수 있습니다.")
+        return self
 
 
 class Credentials(BaseModel):
@@ -109,6 +181,8 @@ class StoredMessage(BaseModel):
     id: str = Field(min_length=1, max_length=100)
     role: Literal["system", "user", "assistant"]
     content: str = Field(max_length=100_000)
+    sources: list[WebSource] = Field(default_factory=list, max_length=10)
+    attachments: list[ImageAttachment] = Field(default_factory=list, max_length=3)
     createdAt: int = Field(ge=0)
 
 
@@ -119,6 +193,8 @@ class StoredChat(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     model: str = Field(min_length=1, max_length=200)
     useMemory: bool = True
+    useWeb: bool = False
+    archived: bool = False
     createdAt: int = Field(ge=0)
     updatedAt: int = Field(ge=0)
     messages: list[StoredMessage] = Field(max_length=1000)
@@ -132,6 +208,14 @@ class RagSearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=10_000)
     documentIds: list[str] = Field(default_factory=list, max_length=50)
     limit: int = Field(default=5, ge=1, le=10)
+
+
+class WebSearchRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=10_000)
+
+
+class WebFetchRequest(BaseModel):
+    url: str = Field(min_length=1, max_length=2_000)
 
 
 class MemoryCreateRequest(BaseModel):
@@ -201,6 +285,22 @@ def get_http_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0))
 
 
+def upstream_message(message: Message) -> dict[str, object]:
+    if not message.attachments:
+        return {"role": message.role, "content": message.content}
+    content: list[dict[str, object]] = []
+    if message.content:
+        content.append({"type": "text", "text": message.content})
+    content.extend(
+        {
+            "type": "image_url",
+            "image_url": {"url": attachment.dataUrl},
+        }
+        for attachment in message.attachments
+    )
+    return {"role": message.role, "content": content}
+
+
 def public_user(user: dict[str, object]) -> dict[str, object]:
     return {
         "id": user["id"],
@@ -263,6 +363,7 @@ async def config() -> dict[str, object]:
         "authRequired": settings.require_auth,
         "registrationAllowed": settings.allow_registration,
         "memoriesEnabled": settings.enable_memories,
+        "webSearchEnabled": settings.enable_web_search,
     }
 
 
@@ -310,6 +411,26 @@ async def get_chats(user: dict[str, object] = Depends(current_user)) -> dict[str
     return {"chats": database.list_chats(str(user["id"]))}
 
 
+@app.get("/api/chats/search")
+async def search_chat_history(
+    q: str,
+    include_archived: bool = True,
+    user: dict[str, object] = Depends(current_user),
+) -> dict[str, object]:
+    query = q.strip()
+    if not query:
+        return {"chats": []}
+    if len(query) > 500:
+        raise HTTPException(status_code=422, detail="검색어가 너무 깁니다.")
+    return {
+        "chats": database.search_chats(
+            str(user["id"]),
+            query,
+            include_archived,
+        )
+    }
+
+
 @app.post("/api/chats/sync")
 async def sync_chats(
     payload: ChatSyncRequest,
@@ -336,6 +457,59 @@ async def save_chat(
     except PermissionError:
         raise HTTPException(status_code=404, detail="Chat not found.")
     return {"chat": chat.model_dump()}
+
+
+@app.get("/api/chats/{chat_id}/export")
+async def export_chat(
+    chat_id: str,
+    format: Literal["markdown", "json"] = "markdown",
+    user: dict[str, object] = Depends(current_user),
+) -> Response:
+    chat = database.get_chat(str(user["id"]), chat_id)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found.")
+    if format == "json":
+        return Response(
+            content=json.dumps(chat, ensure_ascii=False, indent=2),
+            media_type="application/json",
+            headers={
+                "Content-Disposition": f'attachment; filename="chat-{chat_id}.json"'
+            },
+        )
+
+    lines = [f"# {chat['title']}", "", f"Model: `{chat['model']}`", ""]
+    for message in chat["messages"]:
+        heading = {
+            "system": "System",
+            "user": "User",
+            "assistant": "Assistant",
+        }[message["role"]]
+        lines.extend([f"## {heading}", "", message["content"] or ""])
+        attachments = message.get("attachments") or []
+        if attachments:
+            lines.extend(
+                ["", "Attachments:", *[f"- {item['name']}" for item in attachments]]
+            )
+        sources = message.get("sources") or []
+        if sources:
+            lines.extend(
+                [
+                    "",
+                    "Sources:",
+                    *[
+                        f"- [{source['title']}]({source['url']})"
+                        for source in sources
+                    ],
+                ]
+            )
+        lines.append("")
+    return Response(
+        content="\n".join(lines),
+        media_type="text/markdown; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="chat-{chat_id}.md"'
+        },
+    )
 
 
 @app.delete("/api/chats/{chat_id}", status_code=204)
@@ -403,6 +577,66 @@ async def search_knowledge(
         payload.limit,
     )
     return {"results": results}
+
+
+def require_web_search_enabled() -> None:
+    if not settings.enable_web_search:
+        raise HTTPException(status_code=404, detail="Web search feature is disabled.")
+
+
+@app.post("/api/web/search")
+async def search_live_web(
+    payload: WebSearchRequest,
+    _user: dict[str, object] = Depends(current_user),
+) -> dict[str, object]:
+    require_web_search_enabled()
+    try:
+        results = await search_web(
+            payload.query,
+            provider=settings.web_search_provider,
+            url=settings.web_search_url,
+            api_key=settings.web_search_api_key,
+            result_count=settings.web_search_result_count,
+        )
+    except (WebSearchError, httpx.HTTPError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return {"results": results}
+
+
+@app.post("/api/web/fetch")
+async def fetch_web_page(
+    payload: WebFetchRequest,
+    _user: dict[str, object] = Depends(current_user),
+) -> dict[str, str]:
+    require_web_search_enabled()
+    try:
+        return await fetch_public_url(payload.url)
+    except (WebSearchError, httpx.HTTPError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/web/save", status_code=201)
+async def save_web_page(
+    payload: WebFetchRequest,
+    user: dict[str, object] = Depends(current_user),
+) -> dict[str, object]:
+    require_web_search_enabled()
+    try:
+        page = await fetch_public_url(payload.url)
+        chunks = await run_in_threadpool(chunk_text, page["content"])
+    except (WebSearchError, DocumentError, httpx.HTTPError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    parsed = urlparse(page["url"])
+    path_name = Path(parsed.path).stem or "page"
+    filename = clean_filename(f"web-{parsed.hostname or 'page'}-{path_name}.txt")
+    document = database.create_document(
+        str(user["id"]),
+        filename,
+        "text/plain",
+        len(page["content"].encode("utf-8")),
+        chunks,
+    )
+    return {"document": document, "url": page["url"]}
 
 
 def require_memories_enabled() -> None:
@@ -509,7 +743,8 @@ async def chat_completions(
     payload: ChatRequest,
     _user: Optional[dict[str, object]] = Depends(model_access),
 ) -> Response:
-    messages = [message.model_dump() for message in payload.messages]
+    messages = [upstream_message(message) for message in payload.messages]
+    web_sources: list[dict[str, str]] = []
     user_message = next(
         (
             message.content
@@ -518,6 +753,24 @@ async def chat_completions(
         ),
         "",
     )
+    if payload.useWeb:
+        if not settings.enable_web_search:
+            raise HTTPException(status_code=404, detail="Web search feature is disabled.")
+        try:
+            web_sources = await search_web(
+                user_message,
+                provider=settings.web_search_provider,
+                url=settings.web_search_url,
+                api_key=settings.web_search_api_key,
+                result_count=settings.web_search_result_count,
+            )
+        except (WebSearchError, httpx.HTTPError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc))
+        if web_sources:
+            messages.insert(
+                0,
+                {"role": "system", "content": build_web_message(web_sources)},
+            )
     if payload.useMemory and settings.enable_memories and _user:
         user_memories = database.memories_for_prompt(
             str(_user["id"]),
@@ -583,6 +836,12 @@ async def chat_completions(
 
     async def stream():
         try:
+            if web_sources:
+                metadata = json.dumps(
+                    {"openui": {"sources": web_sources}},
+                    ensure_ascii=False,
+                )
+                yield f"data: {metadata}\n\n".encode()
             async for chunk in upstream.aiter_bytes():
                 yield chunk
         finally:

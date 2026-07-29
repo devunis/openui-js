@@ -5,7 +5,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from backend import main, rag
+from backend import main, rag, web_search
 
 
 def mock_client(handler):
@@ -20,6 +20,11 @@ def isolated_database(tmp_path, monkeypatch):
     monkeypatch.setattr(main.settings, "enable_memories", True)
     monkeypatch.setattr(main.settings, "memory_user_char_limit", 2_000)
     monkeypatch.setattr(main.settings, "memory_context_char_limit", 2_000)
+    monkeypatch.setattr(main.settings, "enable_web_search", False)
+    monkeypatch.setattr(main.settings, "web_search_provider", "external")
+    monkeypatch.setattr(main.settings, "web_search_url", "http://search.test")
+    monkeypatch.setattr(main.settings, "web_search_api_key", "")
+    monkeypatch.setattr(main.settings, "web_search_result_count", 5)
     main.database.init_db()
 
 
@@ -55,6 +60,7 @@ def test_config_does_not_expose_api_key(monkeypatch):
         "authRequired": True,
         "registrationAllowed": True,
         "memoriesEnabled": True,
+        "webSearchEnabled": False,
     }
     assert "secret-token" not in response.text
 
@@ -179,6 +185,8 @@ def test_chats_are_persisted_and_isolated_by_user():
         "title": "Persist me",
         "model": "model-a",
         "useMemory": False,
+        "useWeb": True,
+        "archived": True,
         "createdAt": 100,
         "updatedAt": 200,
         "messages": [
@@ -186,6 +194,20 @@ def test_chats_are_persisted_and_isolated_by_user():
                 "id": "message-1",
                 "role": "user",
                 "content": "hello",
+                "sources": [
+                    {
+                        "title": "Example",
+                        "url": "https://example.com",
+                        "snippet": "A source",
+                    }
+                ],
+                "attachments": [
+                    {
+                        "name": "tiny.png",
+                        "contentType": "image/png",
+                        "dataUrl": "data:image/png;base64,aGVsbG8=",
+                    }
+                ],
                 "createdAt": 150,
             }
         ],
@@ -195,6 +217,10 @@ def test_chats_are_persisted_and_isolated_by_user():
     assert sync.status_code == 200
     assert sync.json()["chats"][0]["messages"][0]["content"] == "hello"
     assert sync.json()["chats"][0]["useMemory"] is False
+    assert sync.json()["chats"][0]["useWeb"] is True
+    assert sync.json()["chats"][0]["archived"] is True
+    assert sync.json()["chats"][0]["messages"][0]["sources"][0]["title"] == "Example"
+    assert sync.json()["chats"][0]["messages"][0]["attachments"][0]["name"] == "tiny.png"
     assert first.get("/api/chats").json()["chats"][0]["id"] == "chat-1"
     assert second.get("/api/chats").json()["chats"] == []
 
@@ -233,6 +259,9 @@ def test_chat_storage_requires_authentication():
         "/api/memories",
         json={"content": "private preference", "type": "user"},
     ).status_code == 401
+    assert client.get("/api/chats/search?q=private").status_code == 401
+    assert client.get("/api/chats/missing/export").status_code == 401
+    assert client.post("/api/web/search", json={"query": "private"}).status_code == 401
 
 
 def test_text_document_upload_search_list_and_delete():
@@ -523,6 +552,220 @@ def test_memory_can_be_disabled_per_request_and_globally(monkeypatch):
     assert client.get("/api/memories").status_code == 404
 
 
+def test_chat_search_and_export_are_scoped_to_owner():
+    first = TestClient(main.app)
+    second = TestClient(main.app)
+    register_client(first, "first@example.com")
+    register_client(second, "second@example.com")
+    chat = {
+        "id": "searchable-chat",
+        "title": "Launch notes",
+        "model": "model-a",
+        "archived": False,
+        "createdAt": 100,
+        "updatedAt": 200,
+        "messages": [
+            {
+                "id": "message-1",
+                "role": "assistant",
+                "content": "The lighthouse launches Friday.",
+                "createdAt": 150,
+            }
+        ],
+    }
+    assert first.put("/api/chats/searchable-chat", json=chat).status_code == 200
+
+    searched = first.get("/api/chats/search?q=lighthouse")
+    markdown = first.get("/api/chats/searchable-chat/export?format=markdown")
+    exported_json = first.get("/api/chats/searchable-chat/export?format=json")
+
+    assert searched.status_code == 200
+    assert searched.json()["chats"][0]["id"] == "searchable-chat"
+    assert "# Launch notes" in markdown.text
+    assert "lighthouse launches Friday" in markdown.text
+    assert exported_json.json()["id"] == "searchable-chat"
+    assert second.get("/api/chats/search?q=lighthouse").json()["chats"] == []
+    assert second.get("/api/chats/searchable-chat/export").status_code == 404
+
+
+def test_image_message_is_forwarded_as_multimodal_content(monkeypatch):
+    async def handler(request):
+        body = json.loads(request.content)
+        assert body["messages"][-1]["content"] == [
+            {"type": "text", "text": "What is this?"},
+            {
+                "type": "image_url",
+                "image_url": {"url": "data:image/png;base64,aGVsbG8="},
+            },
+        ]
+        return httpx.Response(
+            200,
+            content=b"data: [DONE]\n\n",
+            headers={"content-type": "text/event-stream"},
+        )
+
+    monkeypatch.setattr(main.settings, "api_base_url", "http://model.test/v1")
+    monkeypatch.setattr(main, "get_http_client", lambda: mock_client(handler))
+    client = TestClient(main.app)
+    register_client(client)
+
+    response = client.post(
+        "/api/chat/completions",
+        json={
+            "model": "model-a",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "What is this?",
+                    "attachments": [
+                        {
+                            "name": "tiny.png",
+                            "contentType": "image/png",
+                            "dataUrl": "data:image/png;base64,aGVsbG8=",
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+
+
+def test_invalid_image_data_is_rejected():
+    client = TestClient(main.app)
+    register_client(client)
+
+    response = client.post(
+        "/api/chat/completions",
+        json={
+            "model": "model-a",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "",
+                    "attachments": [
+                        {
+                            "name": "bad.png",
+                            "contentType": "image/png",
+                            "dataUrl": "data:image/png;base64,not-base64!",
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_non_http_stored_source_is_rejected():
+    client = TestClient(main.app)
+    register_client(client)
+
+    response = client.put(
+        "/api/chats/chat-unsafe",
+        json={
+            "id": "chat-unsafe",
+            "title": "Unsafe source",
+            "model": "model-a",
+            "createdAt": 100,
+            "updatedAt": 100,
+            "messages": [
+                {
+                    "id": "message-unsafe",
+                    "role": "assistant",
+                    "content": "click",
+                    "sources": [
+                        {
+                            "title": "bad",
+                            "url": "javascript:alert(1)",
+                            "snippet": "",
+                        }
+                    ],
+                    "createdAt": 100,
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_web_search_is_injected_and_sources_are_streamed(monkeypatch):
+    async def fake_search(query, **_kwargs):
+        assert query == "latest release"
+        return [
+            {
+                "title": "Release notes",
+                "url": "https://example.com/release",
+                "snippet": "Version 2 is available.",
+            }
+        ]
+
+    async def handler(request):
+        body = json.loads(request.content)
+        assert "[Web Source 1: Release notes]" in body["messages"][0]["content"]
+        assert body["messages"][-1] == {
+            "role": "user",
+            "content": "latest release",
+        }
+        return httpx.Response(
+            200,
+            content=b'data: {"choices":[{"delta":{"content":"Version 2"}}]}\n\n',
+            headers={"content-type": "text/event-stream"},
+        )
+
+    monkeypatch.setattr(main.settings, "enable_web_search", True)
+    monkeypatch.setattr(main.settings, "api_base_url", "http://model.test/v1")
+    monkeypatch.setattr(main, "search_web", fake_search)
+    monkeypatch.setattr(main, "get_http_client", lambda: mock_client(handler))
+    client = TestClient(main.app)
+    register_client(client)
+
+    response = client.post(
+        "/api/chat/completions",
+        json={
+            "model": "model-a",
+            "messages": [{"role": "user", "content": "latest release"}],
+            "useWeb": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert '"openui": {"sources":' in response.text
+    assert "https://example.com/release" in response.text
+    assert "Version 2" in response.text
+
+
+def test_web_page_can_be_saved_as_a_knowledge_document(monkeypatch):
+    async def fake_fetch(url):
+        assert url == "https://example.com/guide"
+        return {
+            "url": url,
+            "content": "OpenUI web knowledge guide with enough searchable content.",
+        }
+
+    monkeypatch.setattr(main.settings, "enable_web_search", True)
+    monkeypatch.setattr(main, "fetch_public_url", fake_fetch)
+    client = TestClient(main.app)
+    register_client(client)
+
+    response = client.post(
+        "/api/web/save",
+        json={"url": "https://example.com/guide"},
+    )
+
+    assert response.status_code == 201
+    assert response.json()["document"]["filename"] == "web-example.com-guide.txt"
+    assert client.get("/api/documents").json()["documents"][0]["chunkCount"] == 1
+
+
+def test_private_web_urls_are_blocked():
+    with pytest.raises(web_search.WebSearchError):
+        web_search.assert_public_url("http://127.0.0.1/private")
+
+
 def test_init_db_migrates_legacy_chats_for_memory_toggle(tmp_path, monkeypatch):
     legacy_path = tmp_path / "legacy.db"
     connection = sqlite3.connect(legacy_path)
@@ -549,7 +792,12 @@ def test_init_db_migrates_legacy_chats_for_memory_toggle(tmp_path, monkeypatch):
             row["name"]
             for row in migrated.execute("PRAGMA table_info(chats)").fetchall()
         }
-    assert "use_memory" in columns
+        message_columns = {
+            row["name"]
+            for row in migrated.execute("PRAGMA table_info(messages)").fetchall()
+        }
+    assert {"use_memory", "use_web", "archived"}.issubset(columns)
+    assert {"sources_json", "attachments_json"}.issubset(message_columns)
 
 
 def test_built_frontends_are_served():
